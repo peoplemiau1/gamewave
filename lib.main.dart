@@ -37,10 +37,12 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
-  final TextEditingController _roomController = TextEditingController(text: "global_room_7551");
+  final TextEditingController _roomController = TextEditingController(
+    text: "global_room_7551",
+  );
   String _status = "Готов к работе";
   bool _isLoading = false;
-  List<String> _logs = [];
+  final List<String> _logs = [];
 
   void _addLog(String msg) {
     setState(() {
@@ -50,37 +52,55 @@ class _MainScreenState extends State<MainScreen> {
 
   // Вызов функции ХОСТА
   Future<void> _handleHost() async {
-    setState(() { _isLoading = true; _status = "Запуск Хоста..."; });
+    setState(() {
+      _isLoading = true;
+      _status = "Запуск Хоста...";
+    });
     _addLog("Попытка создания комнаты: ${_roomController.text}");
-    
+
     try {
       // Вызываем Rust функцию
       final result = await runHost(roomId: _roomController.text);
       _addLog(result);
-      setState(() { _status = "Хост активен"; });
+      setState(() {
+        _status = "Хост активен";
+      });
     } catch (e) {
       _addLog("ОШИБКА: $e");
-      setState(() { _status = "Ошибка запуска"; });
+      setState(() {
+        _status = "Ошибка запуска";
+      });
     } finally {
-      setState(() { _isLoading = false; });
+      setState(() {
+        _isLoading = false;
+      });
     }
   }
 
   // Вызов функции ГОСТЯ
   Future<void> _handleJoin() async {
-    setState(() { _isLoading = true; _status = "Подключение..."; });
+    setState(() {
+      _isLoading = true;
+      _status = "Подключение...";
+    });
     _addLog("Ищем хоста в комнате: ${_roomController.text}");
 
     try {
       // Вызываем Rust функцию
       final result = await runJoin(roomId: _roomController.text);
       _addLog(result);
-      setState(() { _status = "Туннель пробит!"; });
+      setState(() {
+        _status = "Туннель пробит!";
+      });
     } catch (e) {
       _addLog("ОШИБКА: $e");
-      setState(() { _status = "Ошибка туннеля"; });
+      setState(() {
+        _status = "Ошибка туннеля";
+      });
     } finally {
-      setState(() { _isLoading = false; });
+      setState(() {
+        _isLoading = false;
+      });
     }
   }
 
@@ -103,16 +123,38 @@ class _MainScreenState extends State<MainScreen> {
               // Header
               Row(
                 children: [
-                  const Text("GameWave", style: TextStyle(fontSize: 32, fontWeight: FontWeight.black, letterSpacing: -1)),
+                  const Text(
+                    "GameWave",
+                    style: TextStyle(
+                      fontSize: 32,
+                      fontWeight: FontWeight.black,
+                      letterSpacing: -1,
+                    ),
+                  ),
                   const SizedBox(width: 8),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.circular(4)),
-                    child: const Text("PRO", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.redAccent,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Text(
+                      "PRO",
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   ),
                 ],
               ),
-              const Text("Bedrock Internet Multiplayer Tunnel", style: TextStyle(color: Colors.grey)),
+              const Text(
+                "Bedrock Internet Multiplayer Tunnel",
+                style: TextStyle(color: Colors.grey),
+              ),
               const SizedBox(height: 40),
 
               // UI Card
@@ -168,9 +210,16 @@ class _MainScreenState extends State<MainScreen> {
               ),
 
               const SizedBox(height: 30),
-              
+
               // Status & Logs
-              const Text("ЛОГИ ТУННЕЛЯ:", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey)),
+              const Text(
+                "ЛОГИ ТУННЕЛЯ:",
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.grey,
+                ),
+              ),
               const SizedBox(height: 10),
               Expanded(
                 child: Container(
@@ -185,13 +234,26 @@ class _MainScreenState extends State<MainScreen> {
                     itemCount: _logs.length,
                     itemBuilder: (context, index) => Padding(
                       padding: const EdgeInsets.only(bottom: 4),
-                      child: Text(_logs[index], style: const TextStyle(fontFamily: "monospace", color: Colors.greenAccent, fontSize: 13)),
+                      child: Text(
+                        _logs[index],
+                        style: const TextStyle(
+                          fontFamily: "monospace",
+                          color: Colors.greenAccent,
+                          fontSize: 13,
+                        ),
+                      ),
                     ),
                   ),
                 ),
               ),
               const SizedBox(height: 10),
-              Text("Статус: $_status", style: const TextStyle(color: Colors.amberAccent, fontWeight: FontWeight.bold)),
+              Text(
+                "Статус: $_status",
+                style: const TextStyle(
+                  color: Colors.amberAccent,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ],
           ),
         ),

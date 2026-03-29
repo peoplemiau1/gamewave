@@ -1,12 +1,12 @@
+//! WebRTC connection error codes.
+//!
+//! These error codes are sent in CONNECTERROR messages during WebRTC negotiation.
+//!
+//! Note: [`ConnectError`] and [`crate::error::SignalErrorCode`] represent the same logical
+//! error conditions but use different wire formats (u8 vs u32) and have different discriminant
+//! values. ConnectError has a gap at 0x14 in its discriminant sequence.
 
-
-
-
-
-
-
-
-
+/// WebRTC connection error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[repr(u8)]
 pub enum ConnectError {
@@ -67,9 +67,9 @@ pub enum ConnectError {
 }
 
 impl ConnectError {
-    
-    
-    
+    /// Map a numeric wire code to the corresponding [`ConnectError`] variant.
+    ///
+    /// Returns [`Some`] when `code` matches a defined wire discriminant, [`None`] for unknown codes
     pub fn from_code(code: u8) -> Option<Self> {
         match code {
             0x00 => Some(Self::None),
@@ -103,14 +103,14 @@ impl ConnectError {
         }
     }
 
-    
+    /// Get the wire-format numeric code associated with this [`ConnectError`] variant.
     pub fn code(&self) -> u8 {
         *self as u8
     }
 }
 
 impl From<crate::error::SignalErrorCode> for ConnectError {
-    
+    /// Convert a [`crate::error::SignalErrorCode`] into the corresponding [`ConnectError`] variant.
     fn from(code: crate::error::SignalErrorCode) -> Self {
         use crate::error::SignalErrorCode as S;
         match code {
@@ -146,7 +146,7 @@ impl From<crate::error::SignalErrorCode> for ConnectError {
 }
 
 impl From<ConnectError> for crate::error::SignalErrorCode {
-    
+    /// Convert a [`ConnectError`] into its corresponding [`crate::error::SignalErrorCode`].
     fn from(error: ConnectError) -> Self {
         use crate::error::SignalErrorCode as S;
         match error {
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_connect_error_to_signal_error_code() {
-        
+        // Test all ConnectError variants convert to SignalErrorCode
         let variants = [
             ConnectError::None,
             ConnectError::DestinationNotLoggedIn,
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_signal_error_code_to_connect_error() {
-        
+        // Test all SignalErrorCode variants convert to ConnectError
         let variants = [
             SignalErrorCode::None,
             SignalErrorCode::DestinationNotLoggedIn,
@@ -276,31 +276,31 @@ mod tests {
 
     #[test]
     fn test_discriminant_gap_handling() {
-        
-        
+        // Test that the 0x14 gap is handled correctly
+        // SignalingBroadcastDeliveryFailed should be 0x15 in ConnectError
         let connect_error = ConnectError::SignalingBroadcastDeliveryFailed;
         assert_eq!(connect_error.code(), 0x15);
 
-        
+        // SignalingUnicastMessageDeliveryFailed should be 0x13 in ConnectError
         let connect_error = ConnectError::SignalingUnicastMessageDeliveryFailed;
         assert_eq!(connect_error.code(), 0x13);
 
-        
+        // Verify the gap: no variant at 0x14
         assert_eq!(ConnectError::from_code(0x14), None);
     }
 
     #[test]
     fn test_discriminant_values() {
-        
+        // Verify that ConnectError and SignalErrorCode map correctly despite different discriminants
         let signal_broadcast = SignalErrorCode::SignalingBroadcastDeliveryFailed;
         let connect_broadcast: ConnectError = signal_broadcast.into();
 
-        
+        // SignalErrorCode uses sequential values (20 for SignalingBroadcastDeliveryFailed)
         assert_eq!(signal_broadcast as u32, 20);
-        
+        // ConnectError has a gap and uses 0x15 (21)
         assert_eq!(connect_broadcast.code(), 0x15);
 
-        
+        // But they should still round-trip correctly
         let back_to_signal: SignalErrorCode = connect_broadcast.into();
         assert_eq!(signal_broadcast, back_to_signal);
     }

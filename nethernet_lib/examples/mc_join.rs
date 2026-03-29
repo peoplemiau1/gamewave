@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let network_id = rand::random::<u64>();
-    
+    // Клиент шлет запросы на 7551, чтобы найти сервер
     let signaling = Arc::new(LanSignaling::new(network_id, "0.0.0.0:0".parse()?).await?);
 
     tracing::info!("🔎 Ищем хоста через порт 7551...");
@@ -24,13 +24,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream = Arc::new(NethernetStream::connect(signaling.clone(), server_id.to_string(), server_addr).await?);
     tracing::info!("✅ Туннель к хосту пробит!");
 
-    
+    // Создаем ЛОКАЛЬНЫЙ порт 19132, чтобы твой Майнкрафт его увидел
     let proxy_socket = Arc::new(UdpSocket::bind("0.0.0.0:19132").await?);
     let last_client_addr = Arc::new(Mutex::new(None::<SocketAddr>));
 
     tracing::info!("🎮 Теперь заходи в Майнкрафт -> Друзья. Там появится сервер!");
 
-    
+    // Игра -> Туннель
     let s1 = stream.clone();
     let g1 = proxy_socket.clone();
     let addr_cache = last_client_addr.clone();
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    
+    // Туннель -> Игра
     let s2 = stream.clone();
     let g2 = proxy_socket.clone();
     let addr_cache2 = last_client_addr.clone();

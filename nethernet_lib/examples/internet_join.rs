@@ -46,7 +46,7 @@ impl Signaling for WsSignaling {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let room_id = "global_room_7551";
-    let base_url = "http:
+    let base_url = "http://e1.aurorix.net:20833";
 
     println!("🚀 [JOIN] Подключение к сигнальному серверу...");
 
@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let res: AuthRes = client.post(format!("{}/api/login", base_url)).json(&AuthReq { username: username.clone(), password: "123".into() }).send().await?.json().await?;
     let token = res.token.unwrap();
 
-    let ws_url = format!("ws:
+    let ws_url = format!("ws://e1.aurorix.net:20833/ws/{}?token={}", room_id, token);
     let (ws_stream, _) = connect_async(&ws_url).await?;
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -84,18 +84,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    
+    // Запрос MOTD (чтобы Хост проснулся)
     let _ = tx_ws.send(Message::Text(serde_json::to_string(&SignalMessage {
         msg_type: "get_motd".into(), sender_id: username.clone(), payload: serde_json::json!({})
     }).unwrap())).await;
 
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    
+    // Подключение по WebRTC
     let stream = Arc::new(NethernetStream::connect(signaling.clone(), "ANY".into(), "0.0.0.0:0".parse()?).await?);
     println!("✅ [OK] Туннель 7551 к хосту пробит!");
 
-    
+    // БИНДИМСЯ НА 7551 (Майнкрафт гостя увидит нас как LAN-сервер)
     let proxy_socket = Arc::new(UdpSocket::bind("0.0.0.0:19132").await?);
     let last_client_addr = Arc::new(Mutex::new(None::<SocketAddr>));
 

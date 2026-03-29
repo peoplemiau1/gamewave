@@ -51,25 +51,25 @@ impl Signaling for WsSignaling {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().init();
     
-    
+    // МАЙНКРАФТ ВСЕГДА НА 7551
     let mc_addr: SocketAddr = "127.0.0.1:7551".parse()?;
     let room_id = "global_room_7551"; 
-    let base_url = "http:
+    let base_url = "http://e1.aurorix.net:20833";
 
     println!("🚀 [HOST] Запуск туннеля NetherNet (Порт 7551)");
 
     let client = Client::builder().no_proxy().build()?;
     let username = format!("host_{}", rand::random::<u16>());
     
-    
+    // Регистрация и Логин
     let _ = client.post(format!("{}/api/register", base_url))
         .json(&AuthReq { username: username.clone(), password: "123".into() }).send().await;
     let res: AuthRes = client.post(format!("{}/api/login", base_url))
         .json(&AuthReq { username: username.clone(), password: "123".into() }).send().await?.json().await?;
     let token = res.token.ok_or("❌ Ошибка авторизации")?;
 
-    
-    let ws_url = format!("ws:
+    // WebSocket
+    let ws_url = format!("ws://e1.aurorix.net:20833/ws/{}?token={}", room_id, token);
     let (ws_stream, _) = connect_async(&ws_url).await?;
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -84,12 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         network_id: username.clone(), tx_ws: tx_ws.clone(), rx_signals: tx_signals.clone(),
     };
 
-    
+    // Фоновая отправка в WS
     tokio::spawn(async move {
         while let Some(msg) = rx_ws_internal.recv().await { let _ = ws_write.send(msg).await; }
     });
 
-    
+    // Фоновый прием из WS
     tokio::spawn(async move {
         while let Some(Ok(Message::Text(txt))) = ws_read.next().await {
             if let Ok(msg) = serde_json::from_str::<SignalMessage>(&txt) {
@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    
+    // Слушаем WebRTC (на любом свободном порту, сигналы идут через WS)
     let mut listener = NethernetListener::bind(signaling, "0.0.0.0:0".parse()?).await?;
     println!("📡 [READY] Ждем игрока через интернет...");
 

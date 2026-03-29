@@ -23,7 +23,7 @@ use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::ice::network_type::NetworkType;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 
-
+/// NetherNet stream - data transmission over WebRTC
 struct SessionStream {
     session: Arc<Session>,
     recv_future: ReusableBoxFuture<'static, Result<Option<Bytes>>>,
@@ -48,7 +48,7 @@ impl Stream for SessionStream {
     }
 }
 
-
+/// NetherNet stream - data transmission over WebRTC
 pub struct NethernetStream {
     session: Arc<Session>,
     remote_addr: SocketAddr,
@@ -58,26 +58,26 @@ pub struct NethernetStream {
 }
 
 impl NethernetStream {
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+    /// Establishes a WebRTC-backed NethernetStream to a remote peer.
+    ///
+    /// Performs WebRTC offer/answer negotiation via the provided signaling implementation,
+    /// creates reliable and unreliable data channels, exchanges ICE candidates, and waits
+    /// for both data channels to open and for ICE to reach a connected state before
+    /// returning a ready `NethernetStream`.
+    ///
+    /// On success, the returned stream is ready for send/recv operations. This function
+    /// may return `NethernetError::Timeout` if signaling, channel opening, or ICE
+    /// convergence does not complete within the allotted timeout, or `NethernetError::ConnectionClosed`
+    /// if the ICE connection enters a closed/failed state.
     pub async fn connect<S: Signaling + 'static>(
         signaling: Arc<S>,
         remote_network_id: String,
         remote_addr: SocketAddr,
     ) -> Result<Self> {
-        
+        // Create WebRTC API with custom settings
         let media_engine = MediaEngine::default();
 
-        
+        // Configure SettingEngine to avoid IPv6 link-local binding issues
         let mut setting_engine = SettingEngine::default();
         setting_engine.set_network_types(vec![webrtc::ice::network_type::NetworkType::Udp4]);
         setting_engine.set_network_types(vec![NetworkType::Udp4]);
@@ -87,7 +87,7 @@ impl NethernetStream {
             .with_setting_engine(setting_engine)
             .build();
 
-        
+        // Create peer connection
         let ice_servers = std::fs::read_to_string("servers.json").ok().and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok()).unwrap_or_default().into_iter().map(|v| {
         let mut s = webrtc::ice_transport::ice_server::RTCIceServer::default();
         if let Some(urls) = v.get("urls").and_then(|u| u.as_array()) { s.urls = urls.iter().filter_map(|u| u.as_str().map(String::from)).collect(); }
@@ -101,7 +101,7 @@ impl NethernetStream {
 
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
-        
+        // Create data channels
         let reliable_channel = peer_connection
             .create_data_channel(
                 RELIABLE_CHANNEL,
@@ -123,16 +123,16 @@ impl NethernetStream {
             )
             .await?;
 
-        
+        // Generate connection ID
         let mut connection_id_bytes = [0u8; 8];
         rand::rng().fill_bytes(&mut connection_id_bytes);
         let connection_id = u64::from_ne_bytes(connection_id_bytes);
 
-        
+        // Create channels to wait for DataChannel open events
         let (reliable_open_tx, reliable_open_rx) = tokio::sync::oneshot::channel::<()>();
         let (unreliable_open_tx, unreliable_open_rx) = tokio::sync::oneshot::channel::<()>();
 
-        
+        // Set up on_open handlers for DataChannels
         let reliable_open_tx = Arc::new(tokio::sync::Mutex::new(Some(reliable_open_tx)));
         let unreliable_open_tx = Arc::new(tokio::sync::Mutex::new(Some(unreliable_open_tx)));
 
@@ -156,7 +156,7 @@ impl NethernetStream {
             })
         }));
 
-        
+        // Set up ICE candidate handler to signal candidates
         let signaling_clone = signaling.clone();
         let remote_network_id_clone = remote_network_id.clone();
         peer_connection.on_ice_candidate(Box::new(
@@ -166,7 +166,7 @@ impl NethernetStream {
                 Box::pin(async move {
                     if let Some(candidate) = candidate {
                         if let Ok(json) = candidate.to_json() {
-                            
+                            // Serialize full RTCIceCandidateInit (includes candidate, sdp_mid, sdp_mline_index)
                             if let Ok(candidate_json) = serde_json::to_string(&json) {
                                 let candidate_signal =
                                     Signal::candidate(connection_id, candidate_json, network_id);
@@ -178,19 +178,19 @@ impl NethernetStream {
             },
         ));
 
-        
+        // Create offer
         let offer = peer_connection.create_offer(None).await?;
         peer_connection.set_local_description(offer.clone()).await?;
 
-        
-        
+        // Create signal stream BEFORE sending offer to avoid race condition where
+        // answer/candidates arrive before we subscribe
         let mut signals = signaling.signals();
 
-        
+        // Signal the offer
         let offer_signal = Signal::offer(connection_id, offer.sdp, remote_network_id.clone());
         signaling.signal(offer_signal).await?;
 
-        
+        // Wait for answer and handle candidates
         let mut pending_candidates = Vec::new();
         let answer = loop {
             if let Some(signal) = signals.next().await {
@@ -200,7 +200,7 @@ impl NethernetStream {
                             break signal.data;
                         }
                         SignalType::Candidate => {
-                            
+                            // Buffer remote ICE candidates until after set_remote_description
                             let candidate_init = match serde_json::from_str::<
                                 webrtc::ice_transport::ice_candidate::RTCIceCandidateInit,
                             >(&signal.data)
@@ -225,7 +225,7 @@ impl NethernetStream {
             }
         };
 
-        
+        // Set the answer
         let answer_desc =
             webrtc::peer_connection::sdp::session_description::RTCSessionDescription::answer(
                 answer,
@@ -241,7 +241,7 @@ impl NethernetStream {
             }
         }
 
-        
+        // Continue processing candidates with cancellation support
         let peer_connection_clone = peer_connection.clone();
         let cancel_token = CancellationToken::new();
         let cancel_token_clone = cancel_token.clone();
@@ -249,7 +249,7 @@ impl NethernetStream {
             loop {
                 tokio::select! {
                     _ = cancel_token_clone.cancelled() => {
-                        
+                        // Task cancelled, exit loop
                         tracing::debug!("Candidate processing task cancelled");
                         break;
                     }
@@ -284,7 +284,7 @@ impl NethernetStream {
                                 }
                             }
                         } else {
-                            
+                            // Signal stream ended, exit loop
                             break;
                         }
                     }
@@ -294,21 +294,21 @@ impl NethernetStream {
 
         let session = Arc::new(Session::new(peer_connection.clone()));
 
-        
+        // Set up data channels
         session.set_reliable_channel(reliable_channel).await?;
         session.set_unreliable_channel(unreliable_channel).await?;
 
-        
+        // Wait for both DataChannels to open (with timeout)
         let timeout_duration = std::time::Duration::from_secs(10);
 
-        
+        // Wait for both channels concurrently within the same timeout window
         tokio::time::timeout(timeout_duration, async {
             let _ = tokio::join!(reliable_open_rx, unreliable_open_rx);
         })
         .await
         .map_err(|_| NethernetError::Timeout)?;
 
-        
+        // Wait for ICE connection to establish
         let peer_conn_clone = peer_connection.clone();
         let ice_connected = tokio::time::timeout(timeout_duration, async move {
             loop {
@@ -332,7 +332,7 @@ impl NethernetStream {
 
         match ice_connected {
             Ok(Ok(())) => {
-                
+                // ICE connection established, cancel the candidate processing task
                 cancel_token.cancel();
             }
             Ok(Err(e)) => {
@@ -348,7 +348,7 @@ impl NethernetStream {
         Ok(Self::from_session(session, remote_addr))
     }
 
-    
+    /// Constructs a NethernetStream from an existing Session and the peer's socket address.
     pub fn from_session(session: Arc<Session>, remote_addr: SocketAddr) -> Self {
         let session_clone = session.clone();
         let recv_future = ReusableBoxFuture::new(async move { session_clone.recv().await });
@@ -367,27 +367,27 @@ impl NethernetStream {
         }
     }
 
-    
+    /// Transmits a payload to the remote endpoint associated with this stream.
     pub async fn send(&self, data: Bytes) -> Result<()> {
         self.session.send(data).await
     }
 
-    
+    /// Receive the next available data frame from this stream.
     pub async fn recv(&self) -> Result<Option<Bytes>> {
         self.session.recv().await
     }
 
-    
+    /// Close the stream and its underlying session.
     pub async fn close(&self) -> Result<()> {
         self.session.close().await
     }
 
-    
+    /// Get the socket address of the remote endpoint for this stream.
     pub fn remote_addr(&self) -> SocketAddr {
         self.remote_addr
     }
 
-    
+    /// Access the underlying session.
     pub fn session(&self) -> Arc<Session> {
         self.session.clone()
     }
@@ -409,33 +409,33 @@ impl AsyncWrite for NethernetStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        
+        // If there's an active send future, poll it first
         if let Some(mut fut) = self.send_future.take() {
             match fut.poll(cx) {
                 Poll::Ready(Ok(())) => {
-                    
+                    // Previous send completed
                 }
                 Poll::Ready(Err(e)) => {
                     return Poll::Ready(Err(io::Error::other(e)));
                 }
                 Poll::Pending => {
-                    
+                    // Still sending
                     self.send_future = Some(fut);
                     return Poll::Pending;
                 }
             }
         }
 
-        
+        // Start new send
         let data = Bytes::copy_from_slice(buf);
         let len = data.len();
         let session = self.session.clone();
         let mut fut = ReusableBoxFuture::new(async move { session.send(data).await });
 
-        
+        // Poll immediately to start the future
         match fut.poll(cx) {
             Poll::Ready(Ok(())) => {
-                
+                // Completed immediately
             }
             Poll::Ready(Err(e)) => {
                 return Poll::Ready(Err(io::Error::other(e)));
@@ -464,7 +464,7 @@ impl AsyncWrite for NethernetStream {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        
+        // First flush any pending writes
         match self.as_mut().poll_flush(cx) {
             Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),

@@ -1,7 +1,7 @@
-
-
-
-
+//! Low-level on-the-wire primitives and helpers for the NetherNet protocol.
+//!
+//! This module defines basic integer formats, byte array helpers, and other
+//! encodings used by discovery and protocol packets.
 
 mod ints;
 mod primitives;

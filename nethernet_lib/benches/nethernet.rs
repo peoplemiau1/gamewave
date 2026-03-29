@@ -89,7 +89,7 @@ fn bench_message_segmentation(c: &mut Criterion) {
 fn bench_discovery_marshal(c: &mut Criterion) {
     let mut group = c.benchmark_group("discovery_marshal");
 
-    
+    // Request packet
     group.bench_function("request_packet", |b| {
         let packet = RequestPacket;
 
@@ -99,7 +99,7 @@ fn bench_discovery_marshal(c: &mut Criterion) {
         });
     });
 
-    
+    // Response packets
     for size in [128, 512, 2048] {
         group.throughput(Throughput::Bytes(size as u64));
 
@@ -118,7 +118,7 @@ fn bench_discovery_marshal(c: &mut Criterion) {
         );
     }
 
-    
+    // Message packets
     for size in [256, 1024] {
         let data = "x".repeat(size);
 
@@ -145,7 +145,7 @@ fn bench_discovery_marshal(c: &mut Criterion) {
 fn bench_discovery_unmarshal(c: &mut Criterion) {
     let mut group = c.benchmark_group("discovery_unmarshal");
 
-    
+    // Request packet
     group.bench_function("request_packet", |b| {
         let packet = RequestPacket;
 
@@ -157,7 +157,7 @@ fn bench_discovery_unmarshal(c: &mut Criterion) {
         });
     });
 
-    
+    // Response packets
     for size in [128, 512, 2048] {
         let packet = ResponsePacket::new(vec![0u8; size]);
 
@@ -181,7 +181,7 @@ fn bench_discovery_unmarshal(c: &mut Criterion) {
         );
     }
 
-    
+    // Message packets
     for size in [256, 1024] {
         let data = "x".repeat(size);
 
@@ -213,7 +213,7 @@ fn bench_discovery_unmarshal(c: &mut Criterion) {
 fn bench_discovery_roundtrip(c: &mut Criterion) {
     let mut group = c.benchmark_group("discovery_roundtrip");
 
-    
+    // Request
     group.bench_function("request_packet", |b| {
         let packet = RequestPacket;
 
@@ -226,7 +226,7 @@ fn bench_discovery_roundtrip(c: &mut Criterion) {
         });
     });
 
-    
+    // Response
     for size in [128, 512, 2048] {
         group.throughput(Throughput::Bytes(size as u64));
 
@@ -247,7 +247,7 @@ fn bench_discovery_roundtrip(c: &mut Criterion) {
         );
     }
 
-    
+    // Message
     for size in [256, 1024] {
         let data = "x".repeat(size);
 

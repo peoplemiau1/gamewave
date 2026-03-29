@@ -1,10 +1,10 @@
-
-
-
-
-
-
-
+//! Tokio-based NetherNet protocol implementation.
+//!
+//! This crate provides high-level types for creating NetherNet clients and servers using WebRTC:
+//! - [`NethernetStream`] for client connections
+//! - [`NethernetListener`] for server-side connection acceptance
+//! - [`Session`] for WebRTC peer connection management
+//! - [`Signaling`] trait and implementations (LAN discovery)
 
 pub mod builders;
 pub mod error;
