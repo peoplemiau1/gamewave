@@ -8,52 +8,41 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Java
-      uses: actions/setup-java@v3
-      with:
-        distribution: 'zulu'
-        java-version: '17'
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
 
-    - name: Set up Flutter
-      uses: subosito/flutter-action@v2
-      with:
-        flutter-version: '3.x'
-        channel: 'stable'
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
 
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi
 
-    # Кэшируем установленные инструменты Rust, чтобы не качать их каждый раз
-    - name: Cache Cargo Tools
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/bin/
-        key: ${{ runner.os }}-cargo-tools
+      - name: Install dependencies
+        run: |
+          cargo install flutter_rust_bridge_codegen@2.11.1
+          cargo install cargo-expand
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libsoup2.4-dev # На всякий случай для линукс-частей
-        cargo install flutter_rust_bridge_codegen@2.11.1 || true
-        cargo install cargo-expand || true
+      - name: Generate Rust Bindings
+        run: |
+          cd rust
+          flutter_rust_bridge_codegen generate
 
-    - name: Install Flutter Dependencies
-      run: flutter pub get
+      - name: Build APK
+        run: flutter build apk --release
 
-    - name: Generate Rust Bindings
-      run: flutter_rust_bridge_codegen generate
-
-    - name: Build APK
-      run: flutter build apk --release
-
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: gamewave-apk
-        path: build/app/outputs/flutter-apk/app-release.apk
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: gamewave-release
+          path: build/app/outputs/flutter-apk/app-release.apk
