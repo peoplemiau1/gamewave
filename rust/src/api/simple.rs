@@ -1,4 +1,4 @@
-// rust/src/api/simple.rs
+
 use crate::logic;
 
 #[flutter_rust_bridge::frb(init)]
@@ -7,7 +7,7 @@ pub fn init_app() {
 }
 
 pub async fn run_host(room_id: String) -> String {
-    // Просто вызываем логику из соседнего файла
+    
     logic::host_task(room_id).await
 }
 

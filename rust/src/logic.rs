@@ -52,13 +52,13 @@ impl Signaling for WsSignaling {
 
 pub async fn host_task(room_id: String) -> String {
     let mc_addr: SocketAddr = "127.0.0.1:7551".parse().unwrap();
-    let base_url = "http://e1.aurorix.net:20833";
+    let base_url = "http:
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let username = format!("host_{}", rand::random::<u16>());
     let _ = client.post(format!("{}/api/register", base_url)).json(&AuthReq { username: username.clone(), password: "123".into() }).send().await;
     let res: AuthRes = client.post(format!("{}/api/login", base_url)).json(&AuthReq { username: username.clone(), password: "123".into() }).send().await.unwrap().json().await.unwrap();
     let token = res.token.unwrap();
-    let ws_url = format!("ws://e1.aurorix.net:20833/ws/{}?token={}", room_id, token);
+    let ws_url = format!("ws:
     let (ws_stream, _) = connect_async(&ws_url).await.unwrap();
     let (mut ws_write, mut ws_read) = ws_stream.split();
     let (tx_ws, mut rx_ws_internal) = mpsc::channel(100);
