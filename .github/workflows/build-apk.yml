@@ -1,0 +1,48 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Java
+      uses: actions/setup-java@v3
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.x'
+        channel: 'stable'
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+    - name: Install flutter_rust_bridge_codegen
+      run: cargo install flutter_rust_bridge_codegen@^2.0.0
+
+    - name: Install Dependencies
+      run: flutter pub get
+
+    - name: Generate Rust Bindings
+      run: flutter_rust_bridge_codegen generate
+
+    - name: Build APK
+      run: flutter build apk --release
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: gamewave-apk
+        path: build/app/outputs/flutter-apk/app-release.apk
