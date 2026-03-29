@@ -1,0 +1,4418 @@
+use bytes::Bytes;
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use nethernet::protocol::packet::discovery::{
+    MessagePacket, RequestPacket, ResponsePacket, marshal, unmarshal,
+};
+use nethernet::protocol::{Message, MessageSegment};
+use std::hint::black_box;
+use std::time::Duration;
+
+const SENDER_ID: u64 = 0x1234567890abcdef;
+
+fn bench_message_encode(c: &mut Criterion) {
+    let mut group = c.benchmark_group("message_encode");
+
+    for size in [512, 1024, 4096] {
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
+            let payload = vec![0u8; size];
+
+            let segment = MessageSegment {
+                remaining_segments: 0,
+                data: Bytes::from(payload),
+            };
+
+            b.iter(|| {
+                let encoded = segment.encode();
+                black_box(encoded);
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_message_decode(c: &mut Criterion) {
+    let mut group = c.benchmark_group("message_decode");
+
+    for size in [512, 1024, 4096] {
+        let payload = vec![0u8; size];
+
+        let segment = MessageSegment {
+            remaining_segments: 0,
+            data: Bytes::from(payload),
+        };
+
+        let encoded = segment.encode();
+
+        group.throughput(Throughput::Bytes(encoded.len() as u64));
+
+        group.bench_with_input(BenchmarkId::from_parameter(size), &encoded, |b, encoded| {
+            b.iter_batched(
+                || encoded.clone(),
+                |data| {
+                    let decoded = MessageSegment::decode(black_box(data)).unwrap();
+                    black_box(decoded);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_message_segmentation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("message_segmentation");
+
+    for size in [1024, 8192, 16384] {
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
+            let payload = Bytes::from(vec![0u8; size]);
+
+            b.iter_batched(
+                || payload.clone(),
+                |data| {
+                    let segments = Message::split_into_segments(black_box(data)).unwrap();
+                    black_box(segments);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_discovery_marshal(c: &mut Criterion) {
+    let mut group = c.benchmark_group("discovery_marshal");
+
+    // Request packet
+    group.bench_function("request_packet", |b| {
+        let packet = RequestPacket;
+
+        b.iter(|| {
+            let marshaled = marshal(black_box(&packet), black_box(SENDER_ID)).unwrap();
+            black_box(marshaled);
+        });
+    });
+
+    // Response packets
+    for size in [128, 512, 2048] {
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("response_packet", size),
+            &size,
+            |b, &size| {
+                let packet = ResponsePacket::new(vec![0u8; size]);
+
+                b.iter(|| {
+                    let marshaled = marshal(black_box(&packet), black_box(SENDER_ID)).unwrap();
+
+                    black_box(marshaled);
+                });
+            },
+        );
+    }
+
+    // Message packets
+    for size in [256, 1024] {
+        let data = "x".repeat(size);
+
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("message_packet", size),
+            &data,
+            |b, data| {
+                let packet = MessagePacket::new(0x9876543210fedcba, data.clone());
+
+                b.iter(|| {
+                    let marshaled = marshal(black_box(&packet), black_box(SENDER_ID)).unwrap();
+
+                    black_box(marshaled);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_discovery_unmarshal(c: &mut Criterion) {
+    let mut group = c.benchmark_group("discovery_unmarshal");
+
+    // Request packet
+    group.bench_function("request_packet", |b| {
+        let packet = RequestPacket;
+
+        let marshaled = marshal(&packet, SENDER_ID).unwrap();
+
+        b.iter(|| {
+            let (pkt, _) = unmarshal(black_box(&marshaled)).unwrap();
+            black_box(pkt);
+        });
+    });
+
+    // Response packets
+    for size in [128, 512, 2048] {
+        let packet = ResponsePacket::new(vec![0u8; size]);
+
+        let marshaled = marshal(&packet, SENDER_ID).unwrap();
+
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("response_packet", size),
+            &marshaled,
+            |b, marshaled| {
+                b.iter_batched(
+                    || marshaled.clone(),
+                    |data| {
+                        let (pkt, _) = unmarshal(black_box(&data)).unwrap();
+                        black_box(pkt);
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    // Message packets
+    for size in [256, 1024] {
+        let data = "x".repeat(size);
+
+        let packet = MessagePacket::new(0x9876543210fedcba, data);
+
+        let marshaled = marshal(&packet, SENDER_ID).unwrap();
+
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("message_packet", size),
+            &marshaled,
+            |b, marshaled| {
+                b.iter_batched(
+                    || marshaled.clone(),
+                    |data| {
+                        let (pkt, _) = unmarshal(black_box(&data)).unwrap();
+                        black_box(pkt);
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_discovery_roundtrip(c: &mut Criterion) {
+    let mut group = c.benchmark_group("discovery_roundtrip");
+
+    // Request
+    group.bench_function("request_packet", |b| {
+        let packet = RequestPacket;
+
+        b.iter(|| {
+            let marshaled = marshal(black_box(&packet), black_box(SENDER_ID)).unwrap();
+
+            let (pkt, _) = unmarshal(&marshaled).unwrap();
+
+            black_box(pkt);
+        });
+    });
+
+    // Response
+    for size in [128, 512, 2048] {
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("response_packet", size),
+            &size,
+            |b, &size| {
+                let packet = ResponsePacket::new(vec![0u8; size]);
+
+                b.iter(|| {
+                    let marshaled = marshal(black_box(&packet), black_box(SENDER_ID)).unwrap();
+
+                    let (pkt, _) = unmarshal(&marshaled).unwrap();
+
+                    black_box(pkt);
+                });
+            },
+        );
+    }
+
+    // Message
+    for size in [256, 1024] {
+        let data = "x".repeat(size);
+
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("message_packet", size),
+            &data,
+            |b, data| {
+                let packet = MessagePacket::new(0x9876543210fedcba, data.clone());
+
+                b.iter(|| {
+                    let marshaled = marshal(black_box(&packet), black_box(SENDER_ID)).unwrap();
+
+                    let (pkt, _) = unmarshal(&marshaled).unwrap();
+
+                    black_box(pkt);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group! {
+    name = benches;
+    config = Criterion::default()
+        .sample_size(100)
+        .warm_up_time(Duration::from_secs(3));
+    targets =
+        bench_message_encode,
+        bench_message_decode,
+        bench_message_segmentation,
+        bench_discovery_marshal,
+        bench_discovery_unmarshal,
+        bench_discovery_roundtrip
+}
+
+criterion_main!(benches);
+//! NetherNet server example using LAN discovery.
+//!
+//! This example demonstrates how to create a NetherNet server that:
+//! - Broadcasts server information on LAN
+//! - Accepts incoming WebRTC connections
+//! - Handles packets from clients
+
+use nethernet::signaling::lan::LanSignaling;
+use nethernet::{NethernetListener, ServerData, Signaling};
+use std::net::SocketAddr;
+use tracing::Level;
+use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing with environment filter
+    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
+
+    let filter_layer = filter::LevelFilter::from_level(Level::TRACE);
+
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(filter_layer)
+        .init();
+
+    // Create server data for LAN discovery
+    let server_data = ServerData::new(
+        "My NetherNet Server".to_string(),
+        "Example World".to_string(),
+    );
+
+    // Set up LAN signaling with unique network ID
+    // IMPORTANT: Server must bind to 7551 to receive broadcast discovery requests
+    let network_id = rand::random::<u64>();
+    let bind_addr: SocketAddr = "0.0.0.0:7551".parse()?;
+
+    let signaling = LanSignaling::new(network_id, bind_addr).await?;
+
+    // Set server data for discovery responses
+    signaling.set_pong_data(server_data.marshal()?);
+
+    tracing::info!("NetherNet server starting");
+    tracing::info!("   Network ID: {}", network_id);
+    tracing::info!("   Listening on: {}", bind_addr);
+    tracing::info!("   Broadcasting discovery responses...");
+
+    // Create listener
+    let mut listener = NethernetListener::bind(signaling, bind_addr).await?;
+    tracing::info!("✅ Server ready and responding to LAN discovery");
+
+    // Accept incoming connections
+    loop {
+        match listener.accept().await {
+            Ok(session) => {
+                tracing::info!("🔗 New client connected");
+
+                // Spawn a task to handle this client
+                tokio::spawn(async move {
+                    let mut packet_count = 0;
+
+                    loop {
+                        match session.recv().await {
+                            Ok(Some(data)) => {
+                                packet_count += 1;
+                                // Echo the packet back
+                                if let Err(e) = session.send(data).await {
+                                    tracing::error!("Failed to send packet: {}", e);
+                                    break;
+                                }
+                            }
+                            Ok(None) => {
+                                tracing::info!("Client disconnected gracefully");
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::error!("Error receiving packet: {}", e);
+                                break;
+                            }
+                        }
+                    }
+
+                    tracing::info!("Client session ended ({} packets received)", packet_count);
+                });
+            }
+            Err(e) => {
+                tracing::error!("Failed to accept connection: {}", e);
+            }
+        }
+    }
+}
+//! NetherNet client example using LAN discovery.
+//!
+//! This example demonstrates how to create a NetherNet client that:
+//! - Discovers servers on LAN via broadcast
+//! - Connects via WebRTC
+//! - Sends and receives packets
+
+use nethernet::NethernetStream;
+use nethernet::signaling::lan::LanSignaling;
+use rand::Rng;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::Level;
+use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
+
+    let filter_layer = filter::LevelFilter::from_level(Level::DEBUG);
+
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(filter_layer)
+        .init();
+
+    // Create client signaling with unique network ID
+    // Use port 0 to let OS assign a free port (different from server's 7551)
+    let mut network_id_bytes = [0u8; 8];
+    rand::rng().fill_bytes(&mut network_id_bytes);
+    let network_id = u64::from_le_bytes(network_id_bytes);
+    let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
+
+    let signaling = Arc::new(LanSignaling::new(network_id, bind_addr).await?);
+
+    tracing::info!("NetherNet client starting");
+    tracing::info!("   Network ID: {}", network_id);
+    tracing::info!("   Scanning for servers on LAN...");
+
+    // Read discovery timeout from environment variable or use default
+    let discovery_timeout_secs = std::env::var("DISCOVERY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(3);
+
+    tracing::info!("   Discovery timeout: {}s", discovery_timeout_secs);
+
+    // Wait for server discovery via broadcast
+    tokio::time::sleep(Duration::from_secs(discovery_timeout_secs)).await;
+
+    // Get discovered servers
+    let servers = signaling.discover().await;
+
+    if servers.is_empty() {
+        tracing::error!("No servers found on LAN!");
+        tracing::info!("Make sure a server is running on port 7551");
+        return Ok(());
+    }
+
+    // Select the first discovered server
+    let (server_network_id, server_data) = servers.iter().next().unwrap();
+    tracing::info!("🎯 Found server with network ID: {}", server_network_id);
+    tracing::debug!("   Server data: {:?}", server_data);
+
+    // Get the actual server address from the signaling layer
+    let server_addr = signaling
+        .get_address(*server_network_id)
+        .await
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Address not found for network ID {}", server_network_id),
+            )
+        })?;
+
+    tracing::info!(
+        "🔗 Connecting to server at {} (network ID: {})",
+        server_addr,
+        server_network_id
+    );
+
+    // Connect to the server using discovered network ID
+    let mut stream = NethernetStream::connect(
+        signaling.clone(),
+        server_network_id.to_string(),
+        server_addr,
+    )
+    .await?;
+
+    tracing::info!("✅ Connected to server");
+
+    // Send some test packets
+    for i in 1..=10 {
+        let message = format!("Hello from client, packet #{}", i);
+
+        tracing::debug!("📤 Sending: {}", message);
+        stream.write_all(message.as_bytes()).await?;
+        stream.flush().await?;
+
+        // Receive echo response
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await?;
+
+        if n == 0 {
+            tracing::warn!("Connection closed by server");
+            break;
+        }
+
+        let text = String::from_utf8_lossy(&buf[..n]);
+        tracing::debug!("📥 Received: {}", text);
+
+        // Wait a bit between packets
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // Test large packet (will be segmented)
+    tracing::info!("📦 Sending large packet (20KB)...");
+    let large_data = vec![0xAB; 20_000];
+    stream.write_all(&large_data).await?;
+    stream.flush().await?;
+
+    // Read back large packet
+    let mut response = vec![0u8; 20_000];
+    stream.read_exact(&mut response).await?;
+    tracing::info!("✅ Large packet echoed back ({} bytes)", response.len());
+
+    // Close connection gracefully
+    tracing::info!("👋 Closing connection...");
+    stream.close().await?;
+    tracing::info!("✅ Connection closed");
+
+    Ok(())
+}
+pub mod constants;
+pub mod message;
+pub mod packet;
+pub mod signal;
+pub mod types;
+pub mod webrtc;
+
+pub use message::{Message, MessageSegment};
+pub use signal::{Signal, SignalType};
+pub use webrtc::{ConnectError, NegotiationMessage};
+use crate::error::{NethernetError, SignalErrorCode};
+use std::fmt;
+use std::str::FromStr;
+
+/// Signal types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalType {
+    /// CONNECTREQUEST - Connection request (offer)
+    Offer,
+    /// CONNECTRESPONSE - Connection response (answer)
+    Answer,
+    /// CANDIDATEADD - ICE candidate addition
+    Candidate,
+    /// CONNECTERROR - Connection error
+    Error,
+}
+
+impl SignalType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SignalType::Offer => "CONNECTREQUEST",
+            SignalType::Answer => "CONNECTRESPONSE",
+            SignalType::Candidate => "CANDIDATEADD",
+            SignalType::Error => "CONNECTERROR",
+        }
+    }
+}
+
+impl FromStr for SignalType {
+    type Err = NethernetError;
+
+    /// Parses a signal type from its wire string representation.
+    ///
+    /// Recognizes the following exact strings: `"CONNECTREQUEST"`, `"CONNECTRESPONSE"`,
+    /// `"CANDIDATEADD"`, and `"CONNECTERROR"`. For any other input, returns
+    /// `NethernetError::Other` with an "Unknown signal type" message.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "CONNECTREQUEST" => Ok(SignalType::Offer),
+            "CONNECTRESPONSE" => Ok(SignalType::Answer),
+            "CANDIDATEADD" => Ok(SignalType::Candidate),
+            "CONNECTERROR" => Ok(SignalType::Error),
+            _ => Err(NethernetError::Other(format!("Unknown signal type: {}", s))),
+        }
+    }
+}
+
+impl fmt::Display for SignalType {
+    /// Formats the signal type as its canonical protocol string.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// NetherNet signal message
+#[derive(Debug, Clone)]
+pub struct Signal {
+    /// Signal type
+    pub signal_type: SignalType,
+    /// Connection ID
+    pub connection_id: u64,
+    /// Signal data (SDP, ICE candidate, etc.)
+    pub data: String,
+    /// Network ID (receiver/sender)
+    pub network_id: String,
+}
+
+impl Signal {
+    /// Constructs a Signal from its components.
+    pub fn new(
+        signal_type: SignalType,
+        connection_id: u64,
+        data: String,
+        network_id: String,
+    ) -> Self {
+        Self {
+            signal_type,
+            connection_id,
+            data,
+            network_id,
+        }
+    }
+
+    /// Constructs a Signal with type Offer (CONNECTREQUEST) using the given connection ID, SDP payload, and network ID.
+    pub fn offer(connection_id: u64, sdp: String, network_id: String) -> Self {
+        Self::new(SignalType::Offer, connection_id, sdp, network_id)
+    }
+
+    /// Creates a [`Signal`] with type [`SignalType::Answer`] for the specified connection, SDP payload, and network.
+    pub fn answer(connection_id: u64, sdp: String, network_id: String) -> Self {
+        Self::new(SignalType::Answer, connection_id, sdp, network_id)
+    }
+
+    /// Creates a [`Signal`] with type [`SignalType::Candidate`] for the given connection and network.
+    pub fn candidate(connection_id: u64, candidate: String, network_id: String) -> Self {
+        Self::new(SignalType::Candidate, connection_id, candidate, network_id)
+    }
+
+    /// Create a [`Signal`] representing a connection error.
+    pub fn error(connection_id: u64, error_code: SignalErrorCode, network_id: String) -> Self {
+        Self::new(
+            SignalType::Error,
+            connection_id,
+            (error_code as u32).to_string(),
+            network_id,
+        )
+    }
+
+    /// Parses a Signal from a space-separated string and assigns the provided network ID.
+    ///
+    /// The input string must contain exactly three space-separated tokens in the form:
+    /// `TYPE CONNECTION_ID DATA`
+    /// - `TYPE` is the signal type token (e.g., `CONNECTREQUEST`, `CONNECTRESPONSE`, `CANDIDATEADD`, `CONNECTERROR`).
+    /// - `CONNECTION_ID` is a base-10 unsigned integer.
+    /// - `DATA` is the remaining token (signal payload such as SDP or ICE candidate).
+    pub fn from_string(s: &str, network_id: String) -> Result<Self, NethernetError> {
+        let parts: Vec<&str> = s.splitn(3, ' ').collect();
+        if parts.len() != 3 {
+            return Err(NethernetError::Other(format!(
+                "Invalid signal format: expected 3 parts, got {}",
+                parts.len()
+            )));
+        }
+
+        let signal_type = SignalType::from_str(parts[0])?;
+        let connection_id = parts[1]
+            .parse::<u64>()
+            .map_err(|e| NethernetError::Other(format!("Failed to parse connection ID: {}", e)))?;
+        let data = parts[2].to_string();
+
+        Ok(Self {
+            signal_type,
+            connection_id,
+            data,
+            network_id,
+        })
+    }
+}
+
+impl fmt::Display for Signal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} {}",
+            self.signal_type.as_str(),
+            self.connection_id,
+            self.data
+        )
+    }
+}
+use crate::error::{NethernetError, Result};
+use crate::protocol::constants::MAX_MESSAGE_SIZE;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+
+/// Message segment
+/// First byte contains segment count, remainder contains data
+#[derive(Debug, Clone)]
+pub struct MessageSegment {
+    /// Remaining segment count (0 = last segment)
+    pub remaining_segments: u8,
+    /// Segment data
+    pub data: Bytes,
+}
+
+impl MessageSegment {
+    /// Creates a [`MessageSegment`] with the given remaining segment count and payload.
+    pub fn new(remaining_segments: u8, data: Bytes) -> Self {
+        Self {
+            remaining_segments,
+            data,
+        }
+    }
+
+    /// Serialize the segment into a byte buffer where the first byte is the remaining segment count and the rest is the payload.
+    pub fn encode(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(1 + self.data.len());
+        buf.put_u8(self.remaining_segments);
+        buf.extend_from_slice(&self.data);
+        buf.freeze()
+    }
+
+    /// Decode a MessageSegment from bytes.
+    ///
+    /// This is zero-copy as the input `Bytes` is used for the payload.
+    /// Minimum length is 2 bytes (1 for segment count + at least 1 for data) to match go-nethernet.
+    pub fn decode(mut data: Bytes) -> Result<Self> {
+        if data.len() < 2 {
+            return Err(NethernetError::MessageParse(format!(
+                "Message too short, expected at least 2 bytes, got {}",
+                data.len()
+            )));
+        }
+
+        let remaining_segments = data[0];
+        data.advance(1);
+        Ok(Self {
+            remaining_segments,
+            data,
+        })
+    }
+}
+
+/// Complete message - data assembled from segments
+#[derive(Debug, Clone)]
+pub struct Message {
+    /// Expected segment count
+    expected_segments: u8,
+    /// Assembled data
+    data: BytesMut,
+}
+
+impl Message {
+    /// Creates a new, empty Message ready to receive segments.
+    ///
+    /// The returned Message is initialized to expect no segments and has an empty internal buffer.
+    pub fn new() -> Self {
+        Self {
+            expected_segments: 0,
+            data: BytesMut::new(),
+        }
+    }
+
+    /// Adds a segment to the current message accumulator and returns the complete message when assembly finishes.
+    ///
+    /// This validates segment sequencing, appends the segment payload to the internal buffer, and resets internal state when a complete message is produced. If a segment is out of the expected order the accumulator is cleared and a `MessageParse` error is returned.
+    pub fn add_segment(&mut self, segment: MessageSegment) -> Result<Option<Bytes>> {
+        // Set expected_segments if this is the first segment
+        if self.expected_segments == 0 && segment.remaining_segments > 0 {
+            self.expected_segments = segment.remaining_segments + 1;
+            // Pre-allocate buffer to avoid reallocations
+            let estimated = self.expected_segments as usize * MAX_MESSAGE_SIZE;
+            self.data.reserve(estimated);
+        }
+
+        // Check segment order
+        if self.expected_segments > 0 {
+            let expected_remaining = self.expected_segments - 1;
+            if expected_remaining != segment.remaining_segments {
+                // Reset state before returning error to keep Message instance safe for reuse
+                self.data.clear();
+                self.expected_segments = 0;
+                return Err(NethernetError::MessageParse(format!(
+                    "Invalid segment sequence: expected {}, got {}",
+                    expected_remaining, segment.remaining_segments
+                )));
+            }
+            self.expected_segments -= 1;
+        }
+
+        // Add data
+        self.data.put(segment.data);
+
+        // Return message if this is the last segment
+        if segment.remaining_segments == 0 {
+            let data = self.data.split().freeze();
+            self.expected_segments = 0;
+            Ok(Some(data))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Splits a byte buffer into protocol-sized message segments.
+    ///
+    /// For inputs shorter than or equal to MAX_MESSAGE_SIZE this returns a single
+    /// segment with `remaining_segments` equal to 0. For longer inputs the data
+    /// is chunked into segments of at most MAX_MESSAGE_SIZE bytes; the first
+    /// returned segment has `remaining_segments = segment_count - 1` and the last
+    /// has `remaining_segments = 0`.
+    #[inline(always)]
+    pub fn split_into_segments(data: Bytes) -> Result<Vec<MessageSegment>> {
+        let len = data.len();
+
+        if len <= MAX_MESSAGE_SIZE {
+            // Optimize for the common single-segment case to avoid div_ceil overhead
+            // and use direct Vec construction to avoid potential macro overhead.
+            let segments = vec![MessageSegment::new(0, data)];
+            return Ok(segments);
+        }
+
+        let segment_count = len.div_ceil(MAX_MESSAGE_SIZE);
+
+        if segment_count > 255 {
+            return Err(NethernetError::MessageTooLarge(len));
+        }
+
+        // PRE-ALLOC
+        let mut segments = Vec::with_capacity(segment_count);
+
+        let mut remaining = data;
+        let mut left = segment_count as u8;
+
+        // Fast path
+        while remaining.len() > MAX_MESSAGE_SIZE {
+            left -= 1;
+
+            let chunk = remaining.split_to(MAX_MESSAGE_SIZE);
+
+            segments.push(MessageSegment::new(left, chunk));
+        }
+
+        // Last chunk
+        if !remaining.is_empty() {
+            left -= 1;
+            segments.push(MessageSegment::new(left, remaining));
+        }
+
+        debug_assert_eq!(left, 0);
+
+        Ok(segments)
+    }
+}
+
+impl Default for Message {
+    /// Creates a new [`Message`] initialized for assembling messages.
+    ///
+    /// # Returns
+    ///
+    /// A [`Message`] with an empty buffer and no expected segments.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_single_segment() {
+        let data = Bytes::from("Hello, World!");
+        let segments = Message::split_into_segments(data.clone()).unwrap();
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].remaining_segments, 0);
+        assert_eq!(segments[0].data, data);
+    }
+
+    #[test]
+    fn test_multiple_segments() {
+        let data = Bytes::from(vec![0u8; MAX_MESSAGE_SIZE * 2 + 100]);
+        let segments = Message::split_into_segments(data.clone()).unwrap();
+
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].remaining_segments, 2);
+        assert_eq!(segments[1].remaining_segments, 1);
+        assert_eq!(segments[2].remaining_segments, 0);
+    }
+
+    #[test]
+    fn test_reassembly() {
+        let original_data = Bytes::from(vec![1u8; MAX_MESSAGE_SIZE * 2 + 100]);
+        let segments = Message::split_into_segments(original_data.clone()).unwrap();
+
+        let mut message = Message::new();
+        for (i, segment) in segments.iter().enumerate() {
+            let result = message.add_segment(segment.clone()).unwrap();
+            if i < segments.len() - 1 {
+                assert!(result.is_none());
+            } else {
+                assert!(result.is_some());
+                assert_eq!(result.unwrap(), original_data);
+            }
+        }
+    }
+
+    #[test]
+    fn test_out_of_order_segments_error() {
+        // Create multiple segments from a large data
+        let data = Bytes::from(vec![42u8; MAX_MESSAGE_SIZE * 2 + 100]);
+        let segments = Message::split_into_segments(data.clone()).unwrap();
+
+        // Should have at least 3 segments
+        assert!(segments.len() >= 3);
+
+        let mut message = Message::new();
+
+        // Add segment 1 (middle segment) first - this should succeed
+        // because it's the first segment being added and sets expected_segments
+        let result = message.add_segment(segments[1].clone());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none()); // Not complete yet
+
+        // Now try to add segment 0 (earlier segment with higher remaining_segments)
+        // This should fail because we expect the next segment in sequence
+        let result = message.add_segment(segments[0].clone());
+        assert!(result.is_err());
+
+        // Verify it's the right error type
+        if let Err(NethernetError::MessageParse(msg)) = result {
+            assert!(msg.contains("Invalid segment sequence"));
+        } else {
+            panic!("Expected MessageParse error for out-of-order segment");
+        }
+    }
+
+    #[test]
+    fn test_memory_efficient_allocation() {
+        // Create 10 segments of 100 bytes each
+        let segment_data = Bytes::from(vec![0u8; 100]);
+        let mut message = Message::new();
+
+        // Add the first segment with remaining_segments = 9
+        let segment = MessageSegment::new(9, segment_data.clone());
+        message.add_segment(segment).unwrap();
+
+        // Capacity should be at least 10 * 100 = 1000
+        // and significantly less than 10 * MAX_MESSAGE_SIZE (100,000)
+        let capacity = message.data.capacity();
+        assert!(capacity >= 1000, "Capacity {} too small", capacity);
+        assert!(
+            capacity < 100000,
+            "Capacity {} too large (over-allocation)",
+            capacity
+        );
+    }
+}
+//! Packet handling.
+
+pub mod discovery;
+//! LAN discovery module for NetherNet.
+//!
+//! This module provides encryption, packet handling, and server advertisement
+//! for LAN discovery using UDP broadcast on port 7551.
+//!
+//! # Discovery Flow
+//!
+//! 1. Client broadcasts [`RequestPacket`] to network
+//! 2. Server responds with [`ResponsePacket`] containing [`ServerData`]
+//! 3. Both exchange [`MessagePacket`] for WebRTC negotiation
+//!
+//! All packets are encrypted with AES-ECB and authenticated with HMAC-SHA256.
+
+mod crypto;
+mod message;
+mod packet;
+mod request;
+mod response;
+mod server_data;
+
+pub use message::MessagePacket;
+pub use packet::{Header, Packet, marshal, unmarshal};
+pub use request::RequestPacket;
+pub use response::ResponsePacket;
+pub use server_data::ServerData;
+//! Discovery request packet.
+//!
+//! Sent by clients to discover servers on the same network using the
+//! broadcast address on port 7551.
+
+use super::packet::Packet;
+use crate::error::Result;
+use crate::protocol::constants::ID_REQUEST_PACKET;
+use std::io::{Read, Write};
+
+/// RequestPacket is sent by clients to discover servers on LAN.
+/// It does not contain any additional data beyond the header.
+#[derive(Debug, Clone, Default)]
+pub struct RequestPacket;
+
+impl Packet for RequestPacket {
+    /// Get the packet identifier for a discovery request.
+    fn id(&self) -> u16 {
+        ID_REQUEST_PACKET
+    }
+
+    /// Reads the packet payload from the provided reader; no-op for a RequestPacket since it has no payload.
+    fn read(&mut self, _r: &mut dyn Read) -> Result<()> {
+        // No data to read
+        Ok(())
+    }
+
+    /// Writes the packet to the provided writer; this packet has no payload so nothing is written.
+    fn write(&self, _w: &mut dyn Write) -> Result<()> {
+        // No data to write
+        Ok(())
+    }
+
+    /// Exposes the packet instance as a dynamically-typed `Any` to allow downcasting.
+    ///
+    /// This is used when the concrete packet type must be recovered from a trait object.
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+//! Encryption and decryption utilities for LAN discovery packets.
+//!
+//! Discovery packets are encrypted using AES-ECB with PKCS7 padding,
+//! and authenticated with HMAC-SHA256 checksums.
+
+use crate::error::{NethernetError, Result};
+use aes::Aes256;
+use aes::cipher::{Block, BlockDecrypt, BlockEncrypt, KeyInit};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
+use std::sync::LazyLock;
+
+/// The encryption key used for packets transmitted during LAN discovery.
+/// This is the SHA-256 hash of 0xdeadbeef (also referenced as Application ID).
+/// Computed once and cached for all subsequent calls.
+static ENCRYPTION_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
+    let mut hasher = Sha256::new();
+    hasher.update(0xdeadbeef_u64.to_le_bytes());
+    let result = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&result);
+    key
+});
+
+/// Pre-initialized AES-256 cipher for encryption and decryption.
+static CIPHER: LazyLock<Aes256> = LazyLock::new(|| Aes256::new(ENCRYPTION_KEY.as_slice().into()));
+
+/// Pre-initialized HMAC-SHA256 state to avoid re-computing the key schedule.
+static HMAC_STATE: LazyLock<Hmac<Sha256>> = LazyLock::new(|| {
+    <Hmac<Sha256> as Mac>::new_from_slice(ENCRYPTION_KEY.as_slice())
+        .expect("HMAC can take key of any size")
+});
+
+/// Encrypts the given buffer in-place using AES-256 in ECB mode with PKCS#7 padding.
+///
+/// The buffer is resized to include PKCS#7 padding (multiple of 16 bytes) before encryption.
+pub(crate) fn encrypt(buf: &mut Vec<u8>) -> Result<()> {
+    // Apply PKCS7 padding
+    let block_size = 16;
+    let data_len = buf.len();
+    let padding_len = block_size - (data_len % block_size);
+    buf.resize(data_len + padding_len, padding_len as u8);
+
+    // Encrypt blocks in-place
+    // Safety: GenericArray/Block is repr(transparent) over [u8; 16]
+    let blocks = unsafe {
+        std::slice::from_raw_parts_mut(
+            buf.as_mut_ptr() as *mut Block<Aes256>,
+            buf.len() / block_size,
+        )
+    };
+    CIPHER.encrypt_blocks(blocks);
+
+    Ok(())
+}
+
+/// Decrypts the given buffer in-place using AES-256 in ECB mode and removes PKCS#7 padding.
+///
+/// Returns an error if the input length is zero or not a multiple of 16, or if PKCS#7 padding is invalid.
+pub(crate) fn decrypt(buf: &mut Vec<u8>) -> Result<()> {
+    if buf.is_empty() || buf.len() % 16 != 0 {
+        return Err(NethernetError::Other(
+            "Invalid encrypted data length".to_string(),
+        ));
+    }
+
+    // Decrypt blocks in-place
+    // Safety: GenericArray/Block is repr(transparent) over [u8; 16]
+    let blocks = unsafe {
+        std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut Block<Aes256>, buf.len() / 16)
+    };
+    CIPHER.decrypt_blocks(blocks);
+
+    // Remove PKCS7 padding
+    if let Some(&padding_len) = buf.last() {
+        if padding_len > 0 && padding_len <= 16 {
+            let data_len = buf.len();
+            if data_len >= padding_len as usize {
+                // Verify padding (constant-time)
+                let padding_start = data_len - padding_len as usize;
+                let mut mismatched: u8 = 0;
+                for &byte in &buf[padding_start..] {
+                    mismatched |= byte ^ padding_len;
+                }
+                if mismatched == 0 {
+                    buf.truncate(padding_start);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Err(NethernetError::Other("Invalid padding".to_string()))
+}
+
+/// Computes an HMAC-SHA256 checksum of the provided data using the module's static encryption key.
+///
+/// Returns a 32-byte HMAC-SHA256 value.
+pub(crate) fn compute_checksum(data: &[u8]) -> [u8; 32] {
+    let mut mac = HMAC_STATE.clone();
+    mac.update(data);
+    let result = mac.finalize();
+    result.into_bytes().into()
+}
+
+/// Verifies that `data` matches the given HMAC-SHA256 `expected` checksum using the module's encryption key.
+///
+/// # Returns
+///
+/// `true` if `expected` matches the HMAC-SHA256 of `data`, `false` otherwise.
+pub(crate) fn verify_checksum(data: &[u8], expected: &[u8; 32]) -> bool {
+    let mut mac = HMAC_STATE.clone();
+    mac.update(data);
+    mac.verify_slice(expected).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encrypt_decrypt() {
+        let data = b"Hello, NetherNet!";
+        let mut buf = data.to_vec();
+        encrypt(&mut buf).unwrap();
+        decrypt(&mut buf).unwrap();
+        assert_eq!(data.as_slice(), buf.as_slice());
+    }
+
+    #[test]
+    fn test_checksum() {
+        let data = b"Test data for checksum";
+        let checksum = compute_checksum(data);
+        assert!(verify_checksum(data, &checksum));
+
+        let wrong_checksum = [0u8; 32];
+        assert!(!verify_checksum(data, &wrong_checksum));
+    }
+}
+//! Discovery message packet.
+//!
+//! Sent by both server and client to negotiate a NetherNet connection
+//! and exchange ICE candidates.
+
+use super::packet::Packet;
+use crate::error::Result;
+use crate::protocol::constants::ID_MESSAGE_PACKET;
+use crate::protocol::types::{U64LE, read_bytes_u32, write_bytes_u32};
+use std::io::{Read, Write};
+
+/// MessagePacket is used for negotiating WebRTC connections.
+/// It contains the recipient network ID and signaling data.
+#[derive(Debug, Clone, Default)]
+pub struct MessagePacket {
+    /// Network ID of the recipient (not the connection ID)
+    pub recipient_id: u64,
+    /// Signaling data (string form of Signal)
+    pub data: String,
+}
+
+impl MessagePacket {
+    /// Create a MessagePacket for sending signaling data to a specific recipient.
+    ///
+    /// `recipient_id` is the recipient's network ID (not a connection ID).
+    /// `data` is the signaling payload as a UTF-8 string (e.g., serialized Signal/ICE info).
+    pub fn new(recipient_id: u64, data: String) -> Self {
+        Self { recipient_id, data }
+    }
+}
+
+impl Packet for MessagePacket {
+    /// Packet identifier for a MessagePacket.
+    fn id(&self) -> u16 {
+        ID_MESSAGE_PACKET
+    }
+
+    /// Reads packet fields from a reader and populates `recipient_id` and `data`.
+    ///
+    /// Reads `recipient_id` as a little-endian 64-bit unsigned integer, then reads a
+    /// 32-bit length-prefixed byte array and converts it to a UTF-8 `String`.
+    /// I/O errors are propagated; invalid UTF-8 is returned as `NethernetError::Other`.
+    fn read(&mut self, r: &mut dyn Read) -> Result<()> {
+        self.recipient_id = U64LE::read(r)?.0;
+        let data_bytes = read_bytes_u32(r)?;
+        self.data = String::from_utf8(data_bytes)
+            .map_err(|e| crate::error::NethernetError::Other(format!("invalid UTF-8: {}", e)))?;
+        Ok(())
+    }
+
+    /// Serializes the packet into the wire format and writes it to the provided writer.
+    ///
+    /// The wire format is: recipient ID as little-endian u64 followed by the data as a
+    /// 32-bit length-prefixed byte sequence.
+    fn write(&self, w: &mut dyn Write) -> Result<()> {
+        U64LE(self.recipient_id).write(w)?;
+        write_bytes_u32(w, self.data.as_bytes())?;
+        Ok(())
+    }
+
+    /// Provide a reference to the packet as a `dyn Any` for downcasting.
+    ///
+    /// This allows callers to attempt a runtime downcast to the concrete packet type.
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+//! Discovery response packet.
+//!
+//! Sent by servers in response to a RequestPacket from clients
+//! to advertise the world/server information.
+use super::packet::Packet;
+use crate::error::Result;
+use crate::protocol::constants::ID_RESPONSE_PACKET;
+use crate::protocol::types::{U32LE, read_bytes_u32};
+use std::io::{Read, Write};
+
+/// ResponsePacket is sent by servers to respond to discovery requests.
+/// It contains hex-encoded ServerData payload.
+#[derive(Debug, Clone, Default)]
+pub struct ResponsePacket {
+    /// Application-specific data (typically ServerData in Minecraft: Bedrock Edition)
+    pub application_data: Vec<u8>,
+}
+
+impl ResponsePacket {
+    /// Create a ResponsePacket containing the provided application data.
+    pub fn new(application_data: Vec<u8>) -> Self {
+        Self { application_data }
+    }
+}
+
+impl Packet for ResponsePacket {
+    /// Provides the packet identifier for a discovery response packet.
+    fn id(&self) -> u16 {
+        ID_RESPONSE_PACKET
+    }
+
+    /// Read hex-encoded application data from `r` and store the decoded bytes in `self.application_data`.
+    fn read(&mut self, r: &mut dyn Read) -> Result<()> {
+        // Read hex-encoded data
+        let hex_data = read_bytes_u32(r)?;
+
+        // Decode from hex
+        self.application_data = hex::decode(&hex_data)
+            .map_err(|e| crate::error::NethernetError::Other(format!("hex decode error: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Writes the packet's application_data as a hex-encoded byte sequence (prefixed with a 32-bit length) to the provided writer.
+    fn write(&self, w: &mut dyn Write) -> Result<()> {
+        // Encode to hex without intermediate allocation
+        let len = self.application_data.len();
+        let hex_len = len * 2;
+
+        // Write length prefix (u32)
+        // We cast to u32, assuming it fits (checked by MAX_BYTES elsewhere usually, but for discovery it's small)
+        U32LE(hex_len as u32).write(w)?;
+
+        // Write hex data in chunks to avoid large allocation
+        let mut buf = [0u8; 2048]; // 512 bytes of input -> 1024 bytes of hex
+        for chunk in self.application_data.chunks(512) {
+            let encoded_len = chunk.len() * 2;
+            hex::encode_to_slice(chunk, &mut buf[..encoded_len]).map_err(|e| {
+                crate::error::NethernetError::Other(format!("hex encode error: {}", e))
+            })?;
+            w.write_all(&buf[..encoded_len])?;
+        }
+        Ok(())
+    }
+
+    /// Exposes the receiver as a `dyn Any` so callers can perform runtime downcasting.
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+//! Discovery packet trait and marshaling/unmarshaling utilities.
+
+use super::crypto::{compute_checksum, decrypt, encrypt, verify_checksum};
+use super::{MessagePacket, RequestPacket, ResponsePacket};
+use crate::error::{NethernetError, Result};
+use crate::protocol::constants::{ID_MESSAGE_PACKET, ID_REQUEST_PACKET, ID_RESPONSE_PACKET};
+use crate::protocol::types::{U16LE, U64LE};
+use std::io::{Cursor, Read, Write};
+
+/// Trait for discovery packets used in LAN discovery.
+pub trait Packet: Send + Sync {
+    /// Returns the unique ID of the packet.
+    fn id(&self) -> u16;
+
+    /// Reads/decodes the packet data from the reader.
+    fn read(&mut self, r: &mut dyn Read) -> Result<()>;
+
+    /// Writes the packet data into the writer.
+    fn write(&self, w: &mut dyn Write) -> Result<()>;
+
+    /// Allows downcasting to concrete packet types.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// Header of a discovery packet.
+#[derive(Debug, Clone)]
+pub struct Header {
+    /// Packet ID
+    pub packet_id: u16,
+    /// Sender network ID
+    pub sender_id: u64,
+}
+
+impl Header {
+    /// Reads a discovery packet header from the provided reader.
+    ///
+    /// This reads a 16-bit little-endian packet ID, a 64-bit little-endian sender ID,
+    /// then consumes and discards 8 bytes of padding.
+    pub fn read(r: &mut dyn Read) -> Result<Self> {
+        let packet_id = U16LE::read(r)?.0;
+        let sender_id = U64LE::read(r)?.0;
+
+        // Discard 8-byte padding
+        let mut padding = [0u8; 8];
+        r.read_exact(&mut padding)?;
+
+        Ok(Self {
+            packet_id,
+            sender_id,
+        })
+    }
+
+    /// Serialize the header into the provided writer using little-endian encoding and fixed padding.
+    pub fn write(&self, w: &mut dyn Write) -> Result<()> {
+        U16LE(self.packet_id).write(w)?;
+        U64LE(self.sender_id).write(w)?;
+        // 8-byte padding
+        w.write_all(&[0u8; 8])?;
+        Ok(())
+    }
+}
+
+/// Encodes a discovery packet together with a sender ID into the wire format.
+///
+/// The output is: a 32-byte HMAC-SHA256 checksum followed by the AES-ECB encrypted payload.
+/// The encrypted payload contains a 16-bit length prefix, the packet header (packet ID and sender ID),
+/// 8 bytes of padding, and the packet-specific data.
+/// Returns an error if the encoded packet exceeds 65,535 bytes or if any underlying write/encryption step fails.
+///
+/// # Returns
+///
+/// A [`Vec<u8>`] containing the serialized packet: the 32-byte HMAC-SHA256 checksum followed by the AES-ECB encrypted payload.
+pub fn marshal(packet: &dyn Packet, sender_id: u64) -> Result<Vec<u8>> {
+    // Discovery packets are generally small (header 18 bytes + length 2 bytes + packet data)
+    // We pre-allocate enough space for checksum (32), length (2), header (18), packet data, and potential padding (up to 16)
+    let mut buf = Vec::with_capacity(32 + 2 + 18 + 64 + 16);
+
+    // Placeholder for HMAC-SHA256 checksum (32 bytes)
+    buf.extend_from_slice(&[0u8; 32]);
+
+    // Placeholder for length (U16LE)
+    buf.extend_from_slice(&[0u8; 2]);
+
+    // Write header directly into buffer
+    let header = Header {
+        packet_id: packet.id(),
+        sender_id,
+    };
+    header.write(&mut buf)?;
+
+    // Write packet data directly into buffer
+    packet.write(&mut buf)?;
+
+    // Fill the actual length
+    let total_len = buf.len();
+    if total_len - 32 > u16::MAX as usize {
+        return Err(NethernetError::MessageTooLarge(total_len - 32));
+    }
+
+    let data_len = (total_len - 32 - 2) as u16;
+    buf[32..34].copy_from_slice(&data_len.to_le_bytes());
+
+    // Compute HMAC-SHA256 checksum of the payload (everything after the 32-byte checksum placeholder)
+    let checksum = compute_checksum(&buf[32..]);
+    buf[..32].copy_from_slice(&checksum);
+
+    // Encrypt the payload in-place
+    // We need to extract the payload part to a temporary Vec or manage it carefully.
+    // Since encrypt() now takes &mut Vec<u8>, we can't easily pass a slice of it.
+    // However, we want to avoid double allocation.
+
+    // Let's modify encrypt slightly to take a slice or just handle the Vec here.
+    // Actually, the easiest way to achieve "zero copy" (or close to it) with the current API
+    // is to split the buffer or use a temporary Vec for the payload part then join.
+    // But the user asked for struct -> Vec -> encrypt -> Vec transition.
+
+    let mut payload = buf.split_off(32);
+    encrypt(&mut payload)?;
+
+    buf.extend_from_slice(&payload);
+
+    Ok(buf)
+}
+
+/// Decodes and verifies a discovery packet from raw bytes, returning the parsed packet and its sender ID.
+///
+/// The function expects the input to be a checksum (32 bytes) followed by an AES-ECB encrypted payload. It
+/// decrypts the payload, verifies the HMAC-SHA256 checksum against the plaintext, reads the payload length and
+/// header, instantiates the concrete packet type based on the header's packet ID, and delegates parsing of the
+/// packet-specific fields to that packet's `read` implementation. Errors are returned for malformed data,
+/// checksum mismatches, oversized/unknown packet IDs, or trailing bytes after parsing.
+///
+/// # Returns
+///
+/// A tuple containing the boxed concrete packet and the sender's 64-bit network ID.
+pub fn unmarshal(data: &[u8]) -> Result<(Box<dyn Packet>, u64)> {
+    if data.len() < 32 {
+        return Err(NethernetError::Other("packet too short".to_string()));
+    }
+
+    // Extract checksum and encrypted payload
+    let checksum: [u8; 32] = data[..32].try_into().unwrap();
+
+    // Copy only the encrypted part into a Vec for in-place decryption
+    let mut payload = data[32..].to_vec();
+    decrypt(&mut payload)?;
+
+    // Verify checksum against decrypted payload
+    if !verify_checksum(&payload, &checksum) {
+        return Err(NethernetError::Other("checksum mismatch".to_string()));
+    }
+
+    let mut cursor = Cursor::new(payload);
+
+    // Read length (2 bytes)
+    let _length = U16LE::read(&mut cursor)?;
+
+    // Read header
+    let header = Header::read(&mut cursor)?;
+
+    // Create appropriate packet based on ID
+    let mut packet: Box<dyn Packet> = match header.packet_id {
+        ID_REQUEST_PACKET => Box::new(RequestPacket),
+        ID_RESPONSE_PACKET => Box::new(ResponsePacket::default()),
+        ID_MESSAGE_PACKET => Box::new(MessagePacket::default()),
+        _ => {
+            return Err(NethernetError::Other(format!(
+                "unknown packet ID: {}",
+                header.packet_id
+            )));
+        }
+    };
+
+    // Read packet data
+    packet.read(&mut cursor)?;
+
+    // Validate that cursor has been fully consumed
+    let cursor_position = cursor.position() as usize;
+    let payload_len = cursor.get_ref().len();
+    if cursor_position < payload_len {
+        let remaining = payload_len - cursor_position;
+        return Err(NethernetError::Other(format!(
+            "trailing data in packet: {} remaining bytes out of {} total payload bytes",
+            remaining, payload_len
+        )));
+    }
+
+    Ok((packet, header.sender_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_header_roundtrip() {
+        let header = Header {
+            packet_id: 0x01,
+            sender_id: 0x1234567890abcdef,
+        };
+
+        let mut buf = Vec::new();
+        header.write(&mut buf).unwrap();
+
+        let mut cursor = Cursor::new(buf);
+        let decoded = Header::read(&mut cursor).unwrap();
+
+        assert_eq!(header.packet_id, decoded.packet_id);
+        assert_eq!(header.sender_id, decoded.sender_id);
+    }
+}
+//! ServerData binary structure for Minecraft: Bedrock Edition.
+//!
+//! Encapsulated in ResponsePacket.ApplicationData and sent in response
+//! to RequestPacket broadcasted by clients on port 7551.
+
+use crate::error::{NethernetError, Result};
+use crate::protocol::types::{
+    read_bytes_u8, read_i32_le, read_u8, write_bytes_u8, write_i32_le, write_u8,
+};
+use std::io::Cursor;
+
+/// Current version of ServerData supported by the discovery module.
+const VERSION: u8 = 4;
+
+/// ServerData defines the binary structure representing worlds in Minecraft: Bedrock Edition.
+#[derive(Debug, Clone)]
+pub struct ServerData {
+    /// Name of the server (typically the player name of the owner)
+    pub server_name: String,
+    /// Name of the world/level
+    pub level_name: String,
+    /// Default game mode (0=Survival, 1=Creative, 2=Adventure, 3=Spectator)
+    pub game_type: u8,
+    /// Current player count (should be at least 1 to appear in server list)
+    pub player_count: i32,
+    /// Maximum player count allowed
+    pub max_player_count: i32,
+    /// Whether this is an Editor Mode project
+    pub editor_world: bool,
+    /// Whether hardcore mode is enabled
+    pub hardcore: bool,
+    /// Transport layer (2 = NetherNet)
+    pub transport_layer: u8,
+    /// Connection type (4 = LAN)
+    pub connection_type: u8,
+}
+
+impl ServerData {
+    /// Constructs a ServerData for the given server and level names using sensible defaults.
+    ///
+    /// server_name: the server owner or player name.
+    /// level_name: the world or level name.
+    ///
+    /// Defaults:
+    /// - game_type = 0 (Survival)
+    /// - player_count = 1
+    /// - max_player_count = 8
+    /// - editor_world = false
+    /// - hardcore = false
+    /// - transport_layer = 2 (NetherNet)
+    /// - connection_type = 4 (LAN)
+    pub fn new(server_name: String, level_name: String) -> Self {
+        Self {
+            server_name,
+            level_name,
+            game_type: 0,
+            player_count: 1,
+            max_player_count: 8,
+            editor_world: false,
+            hardcore: false,
+            transport_layer: 2, // NetherNet
+            connection_type: 4, // LAN
+        }
+    }
+
+    /// Encode the ServerData into the binary format used for discovery ResponsePacket.ApplicationData.
+    ///
+    /// Returns a vector of bytes on success or a NethernetError if encoding fails (for example,
+    /// if a field value would overflow its encoded form or an I/O write fails).
+    ///
+    pub fn marshal(&self) -> Result<Vec<u8>> {
+        // Validate fields that will be shifted to prevent overflow
+        if self.game_type >= 128 {
+            return Err(NethernetError::Other(format!(
+                "game_type must be less than 128 to avoid overflow, got {}",
+                self.game_type
+            )));
+        }
+        if self.transport_layer >= 128 {
+            return Err(NethernetError::Other(format!(
+                "transport_layer must be less than 128 to avoid overflow, got {}",
+                self.transport_layer
+            )));
+        }
+        if self.connection_type >= 128 {
+            return Err(NethernetError::Other(format!(
+                "connection_type must be less than 128 to avoid overflow, got {}",
+                self.connection_type
+            )));
+        }
+
+        let mut buf = Vec::new();
+
+        // Write version
+        write_u8(&mut buf, VERSION)?;
+
+        // Write server name (u8-prefixed string)
+        write_bytes_u8(&mut buf, self.server_name.as_bytes())?;
+
+        // Write level name (u8-prefixed string)
+        write_bytes_u8(&mut buf, self.level_name.as_bytes())?;
+
+        // Write game type (shifted left by 1)
+        write_u8(&mut buf, self.game_type << 1)?;
+
+        // Write player counts (i32 little-endian)
+        write_i32_le(&mut buf, self.player_count)?;
+        write_i32_le(&mut buf, self.max_player_count)?;
+
+        // Write booleans
+        write_u8(&mut buf, if self.editor_world { 1 } else { 0 })?;
+        write_u8(&mut buf, if self.hardcore { 1 } else { 0 })?;
+
+        // Write transport layer and connection type (both shifted left by 1)
+        write_u8(&mut buf, self.transport_layer << 1)?;
+        write_u8(&mut buf, self.connection_type << 1)?;
+
+        Ok(buf)
+    }
+
+    /// Decode a ServerData value from its binary representation.
+    ///
+    /// The function verifies the embedded version, reads each field in the expected
+    /// order (version, u8-prefixed server and level names, game type, player counts,
+    /// booleans, transport layer, connection type), validates UTF-8 for string
+    /// fields, and ensures no unread bytes remain. On success returns a populated
+    /// ServerData; on failure returns a NethernetError describing the problem.
+    pub fn unmarshal(data: &[u8]) -> Result<Self> {
+        let mut cursor = Cursor::new(data);
+
+        // Read and verify version
+        let version = read_u8(&mut cursor)?;
+        if version != VERSION {
+            return Err(NethernetError::Other(format!(
+                "version mismatch: got {}, want {}",
+                version, VERSION
+            )));
+        }
+
+        // Read server name
+        let server_name_bytes = read_bytes_u8(&mut cursor)?;
+        let server_name = String::from_utf8(server_name_bytes)
+            .map_err(|e| NethernetError::Other(format!("invalid server name UTF-8: {}", e)))?;
+
+        // Read level name
+        let level_name_bytes = read_bytes_u8(&mut cursor)?;
+        let level_name = String::from_utf8(level_name_bytes)
+            .map_err(|e| NethernetError::Other(format!("invalid level name UTF-8: {}", e)))?;
+
+        // Read game type (shift right by 1)
+        let game_type = read_u8(&mut cursor)? >> 1;
+
+        // Read player counts (i32 little-endian)
+        let player_count = read_i32_le(&mut cursor)?;
+        let max_player_count = read_i32_le(&mut cursor)?;
+
+        // Read booleans
+        let editor_world = read_u8(&mut cursor)? != 0;
+        let hardcore = read_u8(&mut cursor)? != 0;
+
+        // Read transport layer and connection type (both shift right by 1)
+        let transport_layer = read_u8(&mut cursor)? >> 1;
+        let connection_type = read_u8(&mut cursor)? >> 1;
+
+        // Ensure all data was read
+        let remaining = data.len() - cursor.position() as usize;
+        if remaining != 0 {
+            return Err(NethernetError::Other(format!("unread {} bytes", remaining)));
+        }
+
+        Ok(Self {
+            server_name,
+            level_name,
+            game_type,
+            player_count,
+            max_player_count,
+            editor_world,
+            hardcore,
+            transport_layer,
+            connection_type,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_server_data_roundtrip() {
+        let original = ServerData {
+            server_name: "Test Server".to_string(),
+            level_name: "My World".to_string(),
+            game_type: 0,
+            player_count: 3,
+            max_player_count: 10,
+            editor_world: false,
+            hardcore: false,
+            transport_layer: 2,
+            connection_type: 4,
+        };
+
+        let encoded = original.marshal().unwrap();
+        let decoded = ServerData::unmarshal(&encoded).unwrap();
+
+        assert_eq!(original.server_name, decoded.server_name);
+        assert_eq!(original.level_name, decoded.level_name);
+        assert_eq!(original.game_type, decoded.game_type);
+        assert_eq!(original.player_count, decoded.player_count);
+        assert_eq!(original.max_player_count, decoded.max_player_count);
+        assert_eq!(original.editor_world, decoded.editor_world);
+        assert_eq!(original.hardcore, decoded.hardcore);
+        assert_eq!(original.transport_layer, decoded.transport_layer);
+        assert_eq!(original.connection_type, decoded.connection_type);
+    }
+
+    #[test]
+    fn test_version_mismatch() {
+        let data = vec![5]; // Wrong version
+        let result = ServerData::unmarshal(&data);
+        assert!(result.is_err());
+    }
+}
+//! WebRTC negotiation protocol.
+//!
+//! This module provides WebRTC connection negotiation messages and error handling.
+
+mod error;
+mod negotiation;
+
+pub use error::ConnectError;
+pub use negotiation::NegotiationMessage;
+//! WebRTC connection error codes.
+//!
+//! These error codes are sent in CONNECTERROR messages during WebRTC negotiation.
+//!
+//! Note: [`ConnectError`] and [`crate::error::SignalErrorCode`] represent the same logical
+//! error conditions but use different wire formats (u8 vs u32) and have different discriminant
+//! values. ConnectError has a gap at 0x14 in its discriminant sequence.
+
+/// WebRTC connection error codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[repr(u8)]
+pub enum ConnectError {
+    #[error("no error")]
+    None = 0x00,
+    #[error("destination not logged in")]
+    DestinationNotLoggedIn = 0x01,
+    #[error("negotiation timeout")]
+    NegotiationTimeout = 0x02,
+    #[error("wrong transport version")]
+    WrongTransportVersion = 0x03,
+    #[error("failed to create peer connection")]
+    FailedToCreatePeerConnection = 0x04,
+    #[error("ICE error")]
+    ICE = 0x05,
+    #[error("connect request error")]
+    ConnectRequest = 0x06,
+    #[error("connect response error")]
+    ConnectResponse = 0x07,
+    #[error("candidate add error")]
+    CandidateAdd = 0x08,
+    #[error("inactivity timeout")]
+    InactivityTimeout = 0x09,
+    #[error("failed to create offer")]
+    FailedToCreateOffer = 0x0a,
+    #[error("failed to create answer")]
+    FailedToCreateAnswer = 0x0b,
+    #[error("failed to set local description")]
+    FailedToSetLocalDescription = 0x0c,
+    #[error("failed to set remote description")]
+    FailedToSetRemoteDescription = 0x0d,
+    #[error("negotiation timeout waiting for response")]
+    NegotiationTimeoutWaitingForResponse = 0x0e,
+    #[error("negotiation timeout waiting for accept")]
+    NegotiationTimeoutWaitingForAccept = 0x0f,
+    #[error("incoming connection ignored")]
+    IncomingConnectionIgnored = 0x10,
+    #[error("signaling parsing failure")]
+    SignalingParsingFailure = 0x11,
+    #[error("signaling unknown error")]
+    SignalingUnknownError = 0x12,
+    #[error("signaling unicast message delivery failed")]
+    SignalingUnicastMessageDeliveryFailed = 0x13,
+    #[error("signaling broadcast delivery failed")]
+    SignalingBroadcastDeliveryFailed = 0x15,
+    #[error("signaling message delivery failed")]
+    SignalingMessageDeliveryFailed = 0x16,
+    #[error("signaling TURN auth failed")]
+    SignalingTurnAuthFailed = 0x17,
+    #[error("signaling fallback to best effort delivery")]
+    SignalingFallbackToBestEffortDelivery = 0x18,
+    #[error("no signaling channel")]
+    NoSignalingChannel = 0x19,
+    #[error("not logged in")]
+    NotLoggedIn = 0x1a,
+    #[error("signaling failed to send")]
+    SignalingFailedToSend = 0x1b,
+}
+
+impl ConnectError {
+    /// Map a numeric wire code to the corresponding [`ConnectError`] variant.
+    ///
+    /// Returns [`Some`] when `code` matches a defined wire discriminant, [`None`] for unknown codes
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0x00 => Some(Self::None),
+            0x01 => Some(Self::DestinationNotLoggedIn),
+            0x02 => Some(Self::NegotiationTimeout),
+            0x03 => Some(Self::WrongTransportVersion),
+            0x04 => Some(Self::FailedToCreatePeerConnection),
+            0x05 => Some(Self::ICE),
+            0x06 => Some(Self::ConnectRequest),
+            0x07 => Some(Self::ConnectResponse),
+            0x08 => Some(Self::CandidateAdd),
+            0x09 => Some(Self::InactivityTimeout),
+            0x0a => Some(Self::FailedToCreateOffer),
+            0x0b => Some(Self::FailedToCreateAnswer),
+            0x0c => Some(Self::FailedToSetLocalDescription),
+            0x0d => Some(Self::FailedToSetRemoteDescription),
+            0x0e => Some(Self::NegotiationTimeoutWaitingForResponse),
+            0x0f => Some(Self::NegotiationTimeoutWaitingForAccept),
+            0x10 => Some(Self::IncomingConnectionIgnored),
+            0x11 => Some(Self::SignalingParsingFailure),
+            0x12 => Some(Self::SignalingUnknownError),
+            0x13 => Some(Self::SignalingUnicastMessageDeliveryFailed),
+            0x15 => Some(Self::SignalingBroadcastDeliveryFailed),
+            0x16 => Some(Self::SignalingMessageDeliveryFailed),
+            0x17 => Some(Self::SignalingTurnAuthFailed),
+            0x18 => Some(Self::SignalingFallbackToBestEffortDelivery),
+            0x19 => Some(Self::NoSignalingChannel),
+            0x1a => Some(Self::NotLoggedIn),
+            0x1b => Some(Self::SignalingFailedToSend),
+            _ => None,
+        }
+    }
+
+    /// Get the wire-format numeric code associated with this [`ConnectError`] variant.
+    pub fn code(&self) -> u8 {
+        *self as u8
+    }
+}
+
+impl From<crate::error::SignalErrorCode> for ConnectError {
+    /// Convert a [`crate::error::SignalErrorCode`] into the corresponding [`ConnectError`] variant.
+    fn from(code: crate::error::SignalErrorCode) -> Self {
+        use crate::error::SignalErrorCode as S;
+        match code {
+            S::None => Self::None,
+            S::DestinationNotLoggedIn => Self::DestinationNotLoggedIn,
+            S::NegotiationTimeout => Self::NegotiationTimeout,
+            S::WrongTransportVersion => Self::WrongTransportVersion,
+            S::FailedToCreatePeerConnection => Self::FailedToCreatePeerConnection,
+            S::Ice => Self::ICE,
+            S::ConnectRequest => Self::ConnectRequest,
+            S::ConnectResponse => Self::ConnectResponse,
+            S::CandidateAdd => Self::CandidateAdd,
+            S::InactivityTimeout => Self::InactivityTimeout,
+            S::FailedToCreateOffer => Self::FailedToCreateOffer,
+            S::FailedToCreateAnswer => Self::FailedToCreateAnswer,
+            S::FailedToSetLocalDescription => Self::FailedToSetLocalDescription,
+            S::FailedToSetRemoteDescription => Self::FailedToSetRemoteDescription,
+            S::NegotiationTimeoutWaitingForResponse => Self::NegotiationTimeoutWaitingForResponse,
+            S::NegotiationTimeoutWaitingForAccept => Self::NegotiationTimeoutWaitingForAccept,
+            S::IncomingConnectionIgnored => Self::IncomingConnectionIgnored,
+            S::SignalingParsingFailure => Self::SignalingParsingFailure,
+            S::SignalingUnknownError => Self::SignalingUnknownError,
+            S::SignalingUnicastMessageDeliveryFailed => Self::SignalingUnicastMessageDeliveryFailed,
+            S::SignalingBroadcastDeliveryFailed => Self::SignalingBroadcastDeliveryFailed,
+            S::SignalingMessageDeliveryFailed => Self::SignalingMessageDeliveryFailed,
+            S::SignalingTurnAuthFailed => Self::SignalingTurnAuthFailed,
+            S::SignalingFallbackToBestEffortDelivery => Self::SignalingFallbackToBestEffortDelivery,
+            S::NoSignalingChannel => Self::NoSignalingChannel,
+            S::NotLoggedIn => Self::NotLoggedIn,
+            S::SignalingFailedToSend => Self::SignalingFailedToSend,
+        }
+    }
+}
+
+impl From<ConnectError> for crate::error::SignalErrorCode {
+    /// Convert a [`ConnectError`] into its corresponding [`crate::error::SignalErrorCode`].
+    fn from(error: ConnectError) -> Self {
+        use crate::error::SignalErrorCode as S;
+        match error {
+            ConnectError::None => S::None,
+            ConnectError::DestinationNotLoggedIn => S::DestinationNotLoggedIn,
+            ConnectError::NegotiationTimeout => S::NegotiationTimeout,
+            ConnectError::WrongTransportVersion => S::WrongTransportVersion,
+            ConnectError::FailedToCreatePeerConnection => S::FailedToCreatePeerConnection,
+            ConnectError::ICE => S::Ice,
+            ConnectError::ConnectRequest => S::ConnectRequest,
+            ConnectError::ConnectResponse => S::ConnectResponse,
+            ConnectError::CandidateAdd => S::CandidateAdd,
+            ConnectError::InactivityTimeout => S::InactivityTimeout,
+            ConnectError::FailedToCreateOffer => S::FailedToCreateOffer,
+            ConnectError::FailedToCreateAnswer => S::FailedToCreateAnswer,
+            ConnectError::FailedToSetLocalDescription => S::FailedToSetLocalDescription,
+            ConnectError::FailedToSetRemoteDescription => S::FailedToSetRemoteDescription,
+            ConnectError::NegotiationTimeoutWaitingForResponse => {
+                S::NegotiationTimeoutWaitingForResponse
+            }
+            ConnectError::NegotiationTimeoutWaitingForAccept => {
+                S::NegotiationTimeoutWaitingForAccept
+            }
+            ConnectError::IncomingConnectionIgnored => S::IncomingConnectionIgnored,
+            ConnectError::SignalingParsingFailure => S::SignalingParsingFailure,
+            ConnectError::SignalingUnknownError => S::SignalingUnknownError,
+            ConnectError::SignalingUnicastMessageDeliveryFailed => {
+                S::SignalingUnicastMessageDeliveryFailed
+            }
+            ConnectError::SignalingBroadcastDeliveryFailed => S::SignalingBroadcastDeliveryFailed,
+            ConnectError::SignalingMessageDeliveryFailed => S::SignalingMessageDeliveryFailed,
+            ConnectError::SignalingTurnAuthFailed => S::SignalingTurnAuthFailed,
+            ConnectError::SignalingFallbackToBestEffortDelivery => {
+                S::SignalingFallbackToBestEffortDelivery
+            }
+            ConnectError::NoSignalingChannel => S::NoSignalingChannel,
+            ConnectError::NotLoggedIn => S::NotLoggedIn,
+            ConnectError::SignalingFailedToSend => S::SignalingFailedToSend,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::SignalErrorCode;
+
+    #[test]
+    fn test_connect_error_to_signal_error_code() {
+        // Test all ConnectError variants convert to SignalErrorCode
+        let variants = [
+            ConnectError::None,
+            ConnectError::DestinationNotLoggedIn,
+            ConnectError::NegotiationTimeout,
+            ConnectError::WrongTransportVersion,
+            ConnectError::FailedToCreatePeerConnection,
+            ConnectError::ICE,
+            ConnectError::ConnectRequest,
+            ConnectError::ConnectResponse,
+            ConnectError::CandidateAdd,
+            ConnectError::InactivityTimeout,
+            ConnectError::FailedToCreateOffer,
+            ConnectError::FailedToCreateAnswer,
+            ConnectError::FailedToSetLocalDescription,
+            ConnectError::FailedToSetRemoteDescription,
+            ConnectError::NegotiationTimeoutWaitingForResponse,
+            ConnectError::NegotiationTimeoutWaitingForAccept,
+            ConnectError::IncomingConnectionIgnored,
+            ConnectError::SignalingParsingFailure,
+            ConnectError::SignalingUnknownError,
+            ConnectError::SignalingUnicastMessageDeliveryFailed,
+            ConnectError::SignalingBroadcastDeliveryFailed,
+            ConnectError::SignalingMessageDeliveryFailed,
+            ConnectError::SignalingTurnAuthFailed,
+            ConnectError::SignalingFallbackToBestEffortDelivery,
+            ConnectError::NoSignalingChannel,
+            ConnectError::NotLoggedIn,
+            ConnectError::SignalingFailedToSend,
+        ];
+
+        for variant in variants {
+            let signal_code: SignalErrorCode = variant.into();
+            let connect_code: ConnectError = signal_code.into();
+            assert_eq!(variant, connect_code, "Round-trip failed for {:?}", variant);
+        }
+    }
+
+    #[test]
+    fn test_signal_error_code_to_connect_error() {
+        // Test all SignalErrorCode variants convert to ConnectError
+        let variants = [
+            SignalErrorCode::None,
+            SignalErrorCode::DestinationNotLoggedIn,
+            SignalErrorCode::NegotiationTimeout,
+            SignalErrorCode::WrongTransportVersion,
+            SignalErrorCode::FailedToCreatePeerConnection,
+            SignalErrorCode::Ice,
+            SignalErrorCode::ConnectRequest,
+            SignalErrorCode::ConnectResponse,
+            SignalErrorCode::CandidateAdd,
+            SignalErrorCode::InactivityTimeout,
+            SignalErrorCode::FailedToCreateOffer,
+            SignalErrorCode::FailedToCreateAnswer,
+            SignalErrorCode::FailedToSetLocalDescription,
+            SignalErrorCode::FailedToSetRemoteDescription,
+            SignalErrorCode::NegotiationTimeoutWaitingForResponse,
+            SignalErrorCode::NegotiationTimeoutWaitingForAccept,
+            SignalErrorCode::IncomingConnectionIgnored,
+            SignalErrorCode::SignalingParsingFailure,
+            SignalErrorCode::SignalingUnknownError,
+            SignalErrorCode::SignalingUnicastMessageDeliveryFailed,
+            SignalErrorCode::SignalingBroadcastDeliveryFailed,
+            SignalErrorCode::SignalingMessageDeliveryFailed,
+            SignalErrorCode::SignalingTurnAuthFailed,
+            SignalErrorCode::SignalingFallbackToBestEffortDelivery,
+            SignalErrorCode::NoSignalingChannel,
+            SignalErrorCode::NotLoggedIn,
+            SignalErrorCode::SignalingFailedToSend,
+        ];
+
+        for variant in variants {
+            let connect_code: ConnectError = variant.into();
+            let signal_code: SignalErrorCode = connect_code.into();
+            assert_eq!(variant, signal_code, "Round-trip failed for {:?}", variant);
+        }
+    }
+
+    #[test]
+    fn test_discriminant_gap_handling() {
+        // Test that the 0x14 gap is handled correctly
+        // SignalingBroadcastDeliveryFailed should be 0x15 in ConnectError
+        let connect_error = ConnectError::SignalingBroadcastDeliveryFailed;
+        assert_eq!(connect_error.code(), 0x15);
+
+        // SignalingUnicastMessageDeliveryFailed should be 0x13 in ConnectError
+        let connect_error = ConnectError::SignalingUnicastMessageDeliveryFailed;
+        assert_eq!(connect_error.code(), 0x13);
+
+        // Verify the gap: no variant at 0x14
+        assert_eq!(ConnectError::from_code(0x14), None);
+    }
+
+    #[test]
+    fn test_discriminant_values() {
+        // Verify that ConnectError and SignalErrorCode map correctly despite different discriminants
+        let signal_broadcast = SignalErrorCode::SignalingBroadcastDeliveryFailed;
+        let connect_broadcast: ConnectError = signal_broadcast.into();
+
+        // SignalErrorCode uses sequential values (20 for SignalingBroadcastDeliveryFailed)
+        assert_eq!(signal_broadcast as u32, 20);
+        // ConnectError has a gap and uses 0x15 (21)
+        assert_eq!(connect_broadcast.code(), 0x15);
+
+        // But they should still round-trip correctly
+        let back_to_signal: SignalErrorCode = connect_broadcast.into();
+        assert_eq!(signal_broadcast, back_to_signal);
+    }
+}
+//! WebRTC negotiation messages.
+//!
+//! These messages are sent during WebRTC connection establishment.
+
+use super::error::ConnectError;
+use crate::error::{NethernetError, Result};
+use std::fmt;
+
+/// Message types used for WebRTC negotiation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NegotiationMessage {
+    /// CONNECTREQUEST - Contains SDP offer from client
+    ConnectRequest {
+        connection_id: u64,
+        sdp_offer: String,
+    },
+    /// CONNECTRESPONSE - Contains SDP answer from server
+    ConnectResponse {
+        connection_id: u64,
+        sdp_answer: String,
+    },
+    /// CANDIDATEADD - Contains ICE candidate
+    CandidateAdd {
+        connection_id: u64,
+        candidate: String,
+    },
+    /// CONNECTERROR - Contains error code
+    ConnectError {
+        connection_id: u64,
+        error: ConnectError,
+    },
+}
+
+impl NegotiationMessage {
+    /// Parse a negotiation message from its wire-format string.
+    ///
+    /// The expected wire format is:
+    /// `MESSAGETYPE CONNECTIONID DATA`
+    /// where `DATA` is the payload specific to the message type:
+    /// - `CONNECTREQUEST` — SDP offer
+    /// - `CONNECTRESPONSE` — SDP answer
+    /// - `CANDIDATEADD` — ICE candidate
+    /// - `CONNECTERROR` — numeric error code
+    pub fn parse(s: &str) -> Result<Self> {
+        let parts: Vec<&str> = s.splitn(3, ' ').collect();
+        if parts.len() < 2 {
+            return Err(NethernetError::Other("invalid message format".to_string()));
+        }
+
+        let message_type = parts[0];
+        let connection_id = parts[1]
+            .parse::<u64>()
+            .map_err(|e| NethernetError::Other(format!("invalid connection ID: {}", e)))?;
+
+        // Helper closure for validating payload (parts[2])
+        let validate_payload = |error_msg: &str| -> Result<&str> {
+            if parts.len() < 3 {
+                return Err(NethernetError::Other(error_msg.to_string()));
+            }
+            if parts[2].trim().is_empty() {
+                return Err(NethernetError::Other(error_msg.to_string()));
+            }
+            Ok(parts[2])
+        };
+
+        match message_type {
+            "CONNECTREQUEST" => {
+                let sdp_offer = validate_payload("missing SDP offer")?;
+                Ok(Self::ConnectRequest {
+                    connection_id,
+                    sdp_offer: sdp_offer.to_string(),
+                })
+            }
+            "CONNECTRESPONSE" => {
+                let sdp_answer = validate_payload("missing SDP answer")?;
+                Ok(Self::ConnectResponse {
+                    connection_id,
+                    sdp_answer: sdp_answer.to_string(),
+                })
+            }
+            "CANDIDATEADD" => {
+                let candidate = validate_payload("missing ICE candidate")?;
+                Ok(Self::CandidateAdd {
+                    connection_id,
+                    candidate: candidate.to_string(),
+                })
+            }
+            "CONNECTERROR" => {
+                if parts.len() < 3 {
+                    return Err(NethernetError::Other("missing error code".to_string()));
+                }
+                let error_code = parts[2]
+                    .parse::<u8>()
+                    .map_err(|e| NethernetError::Other(format!("invalid error code: {}", e)))?;
+                let error = ConnectError::from_code(error_code).ok_or_else(|| {
+                    NethernetError::Other(format!("unknown error code: {}", error_code))
+                })?;
+                Ok(Self::ConnectError {
+                    connection_id,
+                    error,
+                })
+            }
+            _ => Err(NethernetError::Other(format!(
+                "unknown message type: {}",
+                message_type
+            ))),
+        }
+    }
+
+    /// Get the connection identifier associated with the message.
+    pub fn connection_id(&self) -> u64 {
+        match self {
+            Self::ConnectRequest { connection_id, .. }
+            | Self::ConnectResponse { connection_id, .. }
+            | Self::CandidateAdd { connection_id, .. }
+            | Self::ConnectError { connection_id, .. } => *connection_id,
+        }
+    }
+
+    /// Return the canonical message type name for this negotiation message.
+    pub fn message_type(&self) -> &'static str {
+        match self {
+            Self::ConnectRequest { .. } => "CONNECTREQUEST",
+            Self::ConnectResponse { .. } => "CONNECTRESPONSE",
+            Self::CandidateAdd { .. } => "CANDIDATEADD",
+            Self::ConnectError { .. } => "CONNECTERROR",
+        }
+    }
+}
+
+impl fmt::Display for NegotiationMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConnectRequest {
+                connection_id,
+                sdp_offer,
+            } => {
+                write!(f, "CONNECTREQUEST {} {}", connection_id, sdp_offer)
+            }
+            Self::ConnectResponse {
+                connection_id,
+                sdp_answer,
+            } => {
+                write!(f, "CONNECTRESPONSE {} {}", connection_id, sdp_answer)
+            }
+            Self::CandidateAdd {
+                connection_id,
+                candidate,
+            } => {
+                write!(f, "CANDIDATEADD {} {}", connection_id, candidate)
+            }
+            Self::ConnectError {
+                connection_id,
+                error,
+            } => {
+                write!(f, "CONNECTERROR {} {}", connection_id, error.code())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connect_request_roundtrip() {
+        let msg = NegotiationMessage::ConnectRequest {
+            connection_id: 12345,
+            sdp_offer: "v=0\r\no=- 123456789 2 IN IP4 127.0.0.1".to_string(),
+        };
+        let s = msg.to_string();
+        let parsed = NegotiationMessage::parse(&s).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_connect_response_roundtrip() {
+        let msg = NegotiationMessage::ConnectResponse {
+            connection_id: 67890,
+            sdp_answer: "v=0\r\no=- 987654321 2 IN IP4 192.168.1.1".to_string(),
+        };
+        let s = msg.to_string();
+        let parsed = NegotiationMessage::parse(&s).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_candidate_add_roundtrip() {
+        let msg = NegotiationMessage::CandidateAdd {
+            connection_id: 11111,
+            candidate: "candidate:1234567890 1 udp 2130706431 192.168.1.100 54321 typ host"
+                .to_string(),
+        };
+        let s = msg.to_string();
+        let parsed = NegotiationMessage::parse(&s).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_connect_error_roundtrip() {
+        let msg = NegotiationMessage::ConnectError {
+            connection_id: 99999,
+            error: ConnectError::NegotiationTimeout,
+        };
+        let s = msg.to_string();
+        let parsed = NegotiationMessage::parse(&s).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_invalid_format() {
+        assert!(NegotiationMessage::parse("INVALID").is_err());
+        assert!(NegotiationMessage::parse("CONNECTREQUEST").is_err());
+        assert!(NegotiationMessage::parse("CONNECTREQUEST abc").is_err());
+    }
+}
+//! Low-level on-the-wire primitives and helpers for the NetherNet protocol.
+//!
+//! This module defines basic integer formats, byte array helpers, and other
+//! encodings used by discovery and protocol packets.
+
+mod ints;
+mod primitives;
+
+pub use ints::{U16LE, U32LE, U64LE};
+pub use primitives::{
+    read_bytes, read_bytes_u8, read_bytes_u32, read_i32_le, read_u8, write_bytes, write_bytes_u8,
+    write_bytes_u32, write_i32_le, write_u8,
+};
+use crate::protocol::constants::MAX_BYTES;
+use std::io::{self, Read, Write};
+
+/// Reads a single byte from the given reader.
+pub fn read_u8(r: &mut dyn Read) -> io::Result<u8> {
+    let mut buf = [0u8; 1];
+    r.read_exact(&mut buf)?;
+    Ok(buf[0])
+}
+
+/// Writes a single byte to the provided writer.
+pub fn write_u8(w: &mut dyn Write, value: u8) -> io::Result<()> {
+    w.write_all(&[value])
+}
+
+/// Read a 32-bit little-endian signed integer from a reader.
+pub fn read_i32_le(r: &mut dyn Read) -> io::Result<i32> {
+    let mut buf = [0u8; 4];
+    r.read_exact(&mut buf)?;
+    Ok(i32::from_le_bytes(buf))
+}
+
+/// Writes a 32-bit signed integer to the writer in little-endian byte order.
+pub fn write_i32_le(w: &mut dyn Write, value: i32) -> io::Result<()> {
+    w.write_all(&value.to_le_bytes())
+}
+
+/// Reads a length-prefixed byte array using a custom length reader.
+pub fn read_bytes<L: Into<u64>>(
+    r: &mut dyn Read,
+    read_length: impl Fn(&mut dyn Read) -> io::Result<L>,
+) -> io::Result<Vec<u8>> {
+    let length: u64 = read_length(r)?.into();
+
+    // Validate length before allocation to prevent OOM attacks
+    if length > MAX_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "byte array length {} exceeds maximum allowed {}",
+                length, MAX_BYTES
+            ),
+        ));
+    }
+
+    let buf_size: usize = length.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "length too large for buffer allocation",
+        )
+    })?;
+    let mut buf = vec![0u8; buf_size];
+    r.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+/// Reads a length-prefixed byte array where the length prefix is a `u8`.
+pub fn read_bytes_u8(r: &mut dyn Read) -> io::Result<Vec<u8>> {
+    read_bytes(r, |r| read_u8(r))
+}
+
+/// Reads a length-prefixed byte array where the length is encoded as a 32-bit little-endian integer.
+pub fn read_bytes_u32(r: &mut dyn Read) -> io::Result<Vec<u8>> {
+    use super::U32LE;
+    let length = U32LE::read(r)?.0;
+
+    // Length already consumed by U32LE::read above, so the closure passed to read_bytes
+    // intentionally ignores its reader parameter and returns the pre-read length.
+    read_bytes(r, |_| Ok(length))
+}
+
+/// Writes `data` prefixed by its length using the provided `write_length` closure.
+pub fn write_bytes<L: TryFrom<usize>>(
+    w: &mut dyn Write,
+    data: &[u8],
+    write_length: impl Fn(&mut dyn Write, L) -> io::Result<()>,
+) -> io::Result<()>
+where
+    <L as TryFrom<usize>>::Error: std::fmt::Debug,
+{
+    if data.len() > MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "data length {} exceeds maximum allowed {}",
+                data.len(),
+                MAX_BYTES
+            ),
+        ));
+    }
+    let length = L::try_from(data.len()).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("length conversion failed: {:?}", e),
+        )
+    })?;
+    write_length(w, length)?;
+    w.write_all(data)?;
+    Ok(())
+}
+
+/// Writes a length-prefixed byte array using a single-byte (u8) length prefix.
+pub fn write_bytes_u8(w: &mut dyn Write, data: &[u8]) -> io::Result<()> {
+    write_bytes(w, data, |w, len: u8| write_u8(w, len))
+}
+
+/// Writes a little-endian u32 length prefix followed by the provided byte slice.
+pub fn write_bytes_u32(w: &mut dyn Write, data: &[u8]) -> io::Result<()> {
+    use super::U32LE;
+    write_bytes(w, data, |w, len: u32| U32LE(len).write(w))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn u8_roundtrip() {
+        let value = 0x42u8;
+        let mut buf = Vec::new();
+        write_u8(&mut buf, value).unwrap();
+        let mut cursor = Cursor::new(buf);
+        let decoded = read_u8(&mut cursor).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn bytes_u8_roundtrip() {
+        let data = vec![1, 2, 3, 4, 5];
+        let mut buf = Vec::new();
+        write_bytes_u8(&mut buf, &data).unwrap();
+        let mut cursor = Cursor::new(buf);
+        let decoded = read_bytes_u8(&mut cursor).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn bytes_u32_roundtrip() {
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let mut buf = Vec::new();
+        write_bytes_u32(&mut buf, &data).unwrap();
+        let mut cursor = Cursor::new(buf);
+        let decoded = read_bytes_u32(&mut cursor).unwrap();
+        assert_eq!(decoded, data);
+    }
+}
+use std::io::{self, Read, Write};
+
+/// Little-endian 16-bit unsigned integer helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct U16LE(pub u16);
+
+impl U16LE {
+    /// Reads a little-endian 16-bit unsigned integer from the given reader.
+    ///
+    /// On success returns a `U16LE` wrapping the decoded `u16`. Propagates any I/O error encountered while reading.
+    pub fn read<R: Read + ?Sized>(r: &mut R) -> io::Result<Self> {
+        let mut buf = [0u8; 2];
+        r.read_exact(&mut buf)?;
+        Ok(U16LE(u16::from_le_bytes(buf)))
+    }
+
+    /// Writes the wrapped integer to the provided writer in little-endian byte order.
+    pub fn write<W: Write + ?Sized>(&self, w: &mut W) -> io::Result<()> {
+        w.write_all(&self.0.to_le_bytes())
+    }
+}
+
+/// Little-endian 32-bit unsigned integer helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct U32LE(pub u32);
+
+impl U32LE {
+    /// Reads a 32-bit little-endian unsigned integer from a reader.
+    pub fn read<R: Read + ?Sized>(r: &mut R) -> io::Result<Self> {
+        let mut buf = [0u8; 4];
+        r.read_exact(&mut buf)?;
+        Ok(U32LE(u32::from_le_bytes(buf)))
+    }
+
+    /// Writes the wrapped integer to the provided writer in little-endian byte order.
+    pub fn write<W: Write + ?Sized>(&self, w: &mut W) -> io::Result<()> {
+        w.write_all(&self.0.to_le_bytes())
+    }
+}
+
+/// Little-endian 64-bit unsigned integer helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct U64LE(pub u64);
+
+impl U64LE {
+    /// Reads a little-endian 64-bit unsigned integer from a reader.
+    pub fn read<R: Read + ?Sized>(r: &mut R) -> io::Result<Self> {
+        let mut buf = [0u8; 8];
+        r.read_exact(&mut buf)?;
+        Ok(U64LE(u64::from_le_bytes(buf)))
+    }
+
+    /// Writes the wrapped integer to the provided writer in little-endian byte order.
+    pub fn write<W: Write + ?Sized>(&self, w: &mut W) -> io::Result<()> {
+        w.write_all(&self.0.to_le_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn u16le_roundtrip() {
+        let value = U16LE(0xABCD);
+        let mut buf = Vec::new();
+        value.write(&mut buf).unwrap();
+        let mut cursor = Cursor::new(buf);
+        let decoded = U16LE::read(&mut cursor).unwrap();
+        assert_eq!(decoded.0, value.0);
+    }
+
+    #[test]
+    fn u32le_roundtrip() {
+        let value = U32LE(0x12345678);
+        let mut buf = Vec::new();
+        value.write(&mut buf).unwrap();
+        let mut cursor = Cursor::new(buf);
+        let decoded = U32LE::read(&mut cursor).unwrap();
+        assert_eq!(decoded.0, value.0);
+    }
+
+    #[test]
+    fn u64le_roundtrip() {
+        let value = U64LE(0x123456789ABCDEF0);
+        let mut buf = Vec::new();
+        value.write(&mut buf).unwrap();
+        let mut cursor = Cursor::new(buf);
+        let decoded = U64LE::read(&mut cursor).unwrap();
+        assert_eq!(decoded.0, value.0);
+    }
+
+    #[test]
+    fn u16le_edge_cases() {
+        for &val in &[0, u16::MAX] {
+            let value = U16LE(val);
+            let mut buf = Vec::new();
+            value.write(&mut buf).unwrap();
+            let mut cursor = Cursor::new(buf);
+            let decoded = U16LE::read(&mut cursor).unwrap();
+            assert_eq!(decoded.0, val);
+        }
+    }
+
+    #[test]
+    fn u32le_edge_cases() {
+        for &val in &[0, u32::MAX] {
+            let value = U32LE(val);
+            let mut buf = Vec::new();
+            value.write(&mut buf).unwrap();
+            let mut cursor = Cursor::new(buf);
+            let decoded = U32LE::read(&mut cursor).unwrap();
+            assert_eq!(decoded.0, val);
+        }
+    }
+
+    #[test]
+    fn u64le_edge_cases() {
+        for &val in &[0, u64::MAX] {
+            let value = U64LE(val);
+            let mut buf = Vec::new();
+            value.write(&mut buf).unwrap();
+            let mut cursor = Cursor::new(buf);
+            let decoded = U64LE::read(&mut cursor).unwrap();
+            assert_eq!(decoded.0, val);
+        }
+    }
+}
+//! Constants for the NetherNet discovery protocol.
+
+/// Default UDP port used for LAN discovery.
+/// Servers should listen for RequestPackets on this port.
+pub const LAN_DISCOVERY_PORT: u16 = 7551;
+
+/// Packet IDs
+pub const ID_REQUEST_PACKET: u16 = 0;
+pub const ID_RESPONSE_PACKET: u16 = 1;
+pub const ID_MESSAGE_PACKET: u16 = 2;
+
+/// Maximum message size (in bytes)
+pub const MAX_MESSAGE_SIZE: usize = 10000;
+
+/// Maximum allowed size for general byte arrays to prevent OOM attacks.
+/// 16 MB is a reasonable upper limit for most protocol use cases.
+pub const MAX_BYTES: usize = 16 * 1024 * 1024; // 16 MB
+
+/// Packet header size (in bytes)
+/// PacketID (2) + SenderID (8) + Padding (8) = 18 bytes
+pub const HEADER_SIZE: usize = 18;
+
+pub const RELIABLE_CHANNEL: &str = "ReliableDataChannel";
+pub const UNRELIABLE_CHANNEL: &str = "UnreliableDataChannel";
+
+/// Default capacity for the bounded packet channel in sessions.
+/// This prevents unbounded memory growth while allowing for bursts of incoming packets.
+pub const DEFAULT_PACKET_CHANNEL_CAPACITY: usize = 1024;
+use std::io;
+use thiserror::Error;
+
+/// Errors related to the NetherNet protocol.
+#[derive(Debug, Error)]
+pub enum NethernetError {
+    /// WebRTC connection error
+    #[error("WebRTC error: {0}")]
+    WebRtc(#[from] webrtc::Error),
+
+    /// ICE connection error
+    #[error("ICE error: {0}")]
+    Ice(String),
+
+    /// DTLS connection error
+    #[error("DTLS error: {0}")]
+    Dtls(String),
+
+    /// SCTP connection error
+    #[error("SCTP error: {0}")]
+    Sctp(String),
+
+    /// Signaling error
+    #[error("Signaling error: {0}")]
+    Signaling(#[from] SignalingError),
+
+    /// IO error
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+
+    /// Connection already closed
+    #[error("Connection closed")]
+    ConnectionClosed,
+
+    /// Data channel error
+    #[error("Data channel error: {0}")]
+    DataChannel(String),
+
+    /// Message parse error
+    #[error("Message parse error: {0}")]
+    MessageParse(String),
+
+    /// Message too large error
+    #[error("Message too large: exceeds maximum size of {0} bytes")]
+    MessageTooLarge(usize),
+
+    /// Timeout error
+    #[error("Operation timed out")]
+    Timeout,
+
+    /// Invalid state
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
+
+    /// General error
+    #[error("{0}")]
+    Other(String),
+}
+
+/// Errors related to signaling operations.
+#[derive(Debug, Error)]
+pub enum SignalingError {
+    /// Signal send error
+    #[error("Failed to send signal: {0}")]
+    SendFailed(String),
+
+    /// Signal receive error
+    #[error("Failed to receive signal: {0}")]
+    ReceiveFailed(String),
+
+    /// Invalid signal
+    #[error("Invalid signal: {0}")]
+    InvalidSignal(String),
+
+    /// Signaling stopped
+    #[error("Signaling stopped")]
+    Stopped,
+
+    /// Network ID not found
+    #[error("Network ID not found: {0}")]
+    NetworkIdNotFound(u64),
+
+    /// Credential error
+    #[error("Credential error: {0}")]
+    CredentialError(String),
+
+    /// Parse error
+    #[error("Parse error: {0}")]
+    ParseError(String),
+}
+
+/// Signal error codes (compatible with Go implementation)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SignalErrorCode {
+    None = 0,
+    DestinationNotLoggedIn = 1,
+    NegotiationTimeout = 2,
+    WrongTransportVersion = 3,
+    FailedToCreatePeerConnection = 4,
+    Ice = 5,
+    ConnectRequest = 6,
+    ConnectResponse = 7,
+    CandidateAdd = 8,
+    InactivityTimeout = 9,
+    FailedToCreateOffer = 10,
+    FailedToCreateAnswer = 11,
+    FailedToSetLocalDescription = 12,
+    FailedToSetRemoteDescription = 13,
+    NegotiationTimeoutWaitingForResponse = 14,
+    NegotiationTimeoutWaitingForAccept = 15,
+    IncomingConnectionIgnored = 16,
+    SignalingParsingFailure = 17,
+    SignalingUnknownError = 18,
+    SignalingUnicastMessageDeliveryFailed = 19,
+    SignalingBroadcastDeliveryFailed = 20,
+    SignalingMessageDeliveryFailed = 21,
+    SignalingTurnAuthFailed = 22,
+    SignalingFallbackToBestEffortDelivery = 23,
+    NoSignalingChannel = 24,
+    NotLoggedIn = 25,
+    SignalingFailedToSend = 26,
+}
+
+impl From<u32> for SignalErrorCode {
+    fn from(code: u32) -> Self {
+        match code {
+            0 => SignalErrorCode::None,
+            1 => SignalErrorCode::DestinationNotLoggedIn,
+            2 => SignalErrorCode::NegotiationTimeout,
+            3 => SignalErrorCode::WrongTransportVersion,
+            4 => SignalErrorCode::FailedToCreatePeerConnection,
+            5 => SignalErrorCode::Ice,
+            6 => SignalErrorCode::ConnectRequest,
+            7 => SignalErrorCode::ConnectResponse,
+            8 => SignalErrorCode::CandidateAdd,
+            9 => SignalErrorCode::InactivityTimeout,
+            10 => SignalErrorCode::FailedToCreateOffer,
+            11 => SignalErrorCode::FailedToCreateAnswer,
+            12 => SignalErrorCode::FailedToSetLocalDescription,
+            13 => SignalErrorCode::FailedToSetRemoteDescription,
+            14 => SignalErrorCode::NegotiationTimeoutWaitingForResponse,
+            15 => SignalErrorCode::NegotiationTimeoutWaitingForAccept,
+            16 => SignalErrorCode::IncomingConnectionIgnored,
+            17 => SignalErrorCode::SignalingParsingFailure,
+            18 => SignalErrorCode::SignalingUnknownError,
+            19 => SignalErrorCode::SignalingUnicastMessageDeliveryFailed,
+            20 => SignalErrorCode::SignalingBroadcastDeliveryFailed,
+            21 => SignalErrorCode::SignalingMessageDeliveryFailed,
+            22 => SignalErrorCode::SignalingTurnAuthFailed,
+            23 => SignalErrorCode::SignalingFallbackToBestEffortDelivery,
+            24 => SignalErrorCode::NoSignalingChannel,
+            25 => SignalErrorCode::NotLoggedIn,
+            26 => SignalErrorCode::SignalingFailedToSend,
+            _ => SignalErrorCode::SignalingUnknownError,
+        }
+    }
+}
+
+impl From<SignalErrorCode> for u32 {
+    fn from(code: SignalErrorCode) -> Self {
+        code as u32
+    }
+}
+
+pub type Result<T> = std::result::Result<T, NethernetError>;
+//! Tokio-based NetherNet protocol implementation.
+//!
+//! This crate provides high-level types for creating NetherNet clients and servers using WebRTC:
+//! - [`NethernetStream`] for client connections
+//! - [`NethernetListener`] for server-side connection acceptance
+//! - [`Session`] for WebRTC peer connection management
+//! - [`Signaling`] trait and implementations (LAN discovery)
+
+pub mod builders;
+pub mod error;
+pub mod protocol;
+pub mod session;
+pub mod signaling;
+pub mod transport;
+
+pub use builders::*;
+pub use error::{NethernetError, Result};
+pub use protocol::packet::discovery::{MessagePacket, RequestPacket, ResponsePacket, ServerData};
+pub use protocol::{ConnectError, Message, MessageSegment, NegotiationMessage, Signal, SignalType};
+pub use session::Session;
+pub use signaling::{Notifier, Signaling};
+pub use transport::{NethernetListener, NethernetStream};
+mod motd;
+
+pub use motd::NethernetMotd;
+use crate::error::Result;
+use crate::protocol::packet::discovery::ServerData;
+
+/// Builder for server MOTD/discovery payload (`ServerData`).
+///
+/// This builder is intended for values passed to `Signaling::set_pong_data`.
+#[derive(Debug, Clone)]
+pub struct NethernetMotd {
+    server_data: ServerData,
+}
+
+impl NethernetMotd {
+    /// Creates a new MOTD builder with sensible defaults.
+    ///
+    /// Defaults:
+    /// - `game_type = 0` (Survival)
+    /// - `player_count = 1`
+    /// - `max_player_count = 8`
+    /// - `editor_world = false`
+    /// - `hardcore = false`
+    /// - `transport_layer = 2` (NetherNet)
+    /// - `connection_type = 4` (LAN)
+    pub fn new(server_name: impl Into<String>, level_name: impl Into<String>) -> Self {
+        Self {
+            server_data: ServerData::new(server_name.into(), level_name.into()),
+        }
+    }
+
+    /// Sets the server name.
+    pub fn server_name(mut self, server_name: impl Into<String>) -> Self {
+        self.server_data.server_name = server_name.into();
+        self
+    }
+
+    /// Sets the level/world name.
+    pub fn level_name(mut self, level_name: impl Into<String>) -> Self {
+        self.server_data.level_name = level_name.into();
+        self
+    }
+
+    /// Sets game type.
+    pub fn game_type(mut self, game_type: u8) -> Self {
+        self.server_data.game_type = game_type;
+        self
+    }
+
+    /// Sets current player count.
+    pub fn player_count(mut self, player_count: i32) -> Self {
+        self.server_data.player_count = player_count;
+        self
+    }
+
+    /// Sets max player count.
+    pub fn max_player_count(mut self, max_player_count: i32) -> Self {
+        self.server_data.max_player_count = max_player_count;
+        self
+    }
+
+    /// Sets editor world flag.
+    pub fn editor_world(mut self, editor_world: bool) -> Self {
+        self.server_data.editor_world = editor_world;
+        self
+    }
+
+    /// Sets hardcore flag.
+    pub fn hardcore(mut self, hardcore: bool) -> Self {
+        self.server_data.hardcore = hardcore;
+        self
+    }
+
+    /// Sets transport layer.
+    pub fn transport_layer(mut self, transport_layer: u8) -> Self {
+        self.server_data.transport_layer = transport_layer;
+        self
+    }
+
+    /// Sets connection type.
+    pub fn connection_type(mut self, connection_type: u8) -> Self {
+        self.server_data.connection_type = connection_type;
+        self
+    }
+
+    /// Builds and returns the underlying `ServerData`.
+    pub fn build(self) -> ServerData {
+        self.server_data
+    }
+
+    /// Marshals the MOTD payload bytes for `Signaling::set_pong_data`.
+    pub fn marshal(self) -> Result<Vec<u8>> {
+        self.server_data.marshal()
+    }
+}
+pub mod listener;
+pub mod stream;
+
+pub use listener::NethernetListener;
+pub use stream::NethernetStream;
+use crate::error::{NethernetError, Result};
+use crate::protocol::{
+    Signal, SignalType,
+    constants::{RELIABLE_CHANNEL, UNRELIABLE_CHANNEL},
+};
+use crate::session::Session;
+use crate::signaling::Signaling;
+use futures::{Stream, StreamExt};
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use webrtc::api::APIBuilder;
+use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::setting_engine::SettingEngine;
+use webrtc::peer_connection::configuration::RTCConfiguration;
+
+/// NetherNet listener - accepts WebRTC connections
+pub struct NethernetListener<S: Signaling> {
+    incoming: mpsc::UnboundedReceiver<Arc<Session>>,
+    local_addr: SocketAddr,
+    cancel_token: CancellationToken,
+    _signal_handler_task: JoinHandle<()>,
+    _phantom: PhantomData<S>,
+}
+
+impl<S: Signaling + 'static> NethernetListener<S> {
+    /// Create a new [`NethernetListener`] bound to the given local address using the provided signaling implementation.
+    ///
+    /// The returned listener is ready to accept inbound WebRTC sessions. It initializes internal queues and dispatch
+    /// structures, and spawns a background task to process signaling events; dropping the listener cancels that task.
+    pub async fn bind(signaling: S, local_addr: SocketAddr) -> Result<Self> {
+        let signaling = Arc::new(signaling);
+        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        let signal_dispatchers = Arc::new(Mutex::new(HashMap::new()));
+        let candidate_notifiers = Arc::new(Mutex::new(HashMap::new()));
+        let cancel_token = CancellationToken::new();
+
+        // Start signal handler task
+        let signal_handler_task = Self::start_signal_handler(
+            signaling,
+            incoming_tx,
+            signal_dispatchers,
+            candidate_notifiers.clone(),
+            cancel_token.clone(),
+        );
+
+        let listener = Self {
+            incoming: incoming_rx,
+            local_addr,
+            cancel_token,
+            _signal_handler_task: signal_handler_task,
+            _phantom: PhantomData,
+        };
+
+        Ok(listener)
+    }
+
+    fn start_signal_handler(
+        signaling: Arc<S>,
+        incoming_tx: mpsc::UnboundedSender<Arc<Session>>,
+        signal_dispatchers: Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<Signal>>>>,
+        candidate_notifiers: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>>,
+        cancel_token: CancellationToken,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut signals = signaling.signals();
+
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        break;
+                    }
+                    signal = signals.next() => {
+                        match signal {
+                            Some(signal) => {
+                                match signal.signal_type {
+                                    SignalType::Offer => {
+                                        if let Err(e) = Self::handle_offer(
+                                            signal,
+                                            &signaling,
+                                            &incoming_tx,
+                                            &signal_dispatchers,
+                                            &candidate_notifiers,
+                                        )
+                                        .await
+                                        {
+                                            tracing::debug!("Failed to handle offer: {}", e);
+                                        }
+                                    }
+                                    SignalType::Answer | SignalType::Candidate | SignalType::Error => {
+                                        // Dispatch to per-connection channel
+                                        let dispatchers = signal_dispatchers.lock().await;
+                                        if let Some(tx) = dispatchers.get(&signal.connection_id) {
+                                            let _ = tx.send(signal);
+                                        }
+                                    }
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    async fn handle_offer(
+        signal: Signal,
+        signaling: &Arc<S>,
+        incoming_tx: &mpsc::UnboundedSender<Arc<Session>>,
+        signal_dispatchers: &Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<Signal>>>>,
+        candidate_notifiers: &Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>>,
+    ) -> Result<()> {
+        // Create WebRTC API with custom settings
+        let media_engine = MediaEngine::default();
+
+        // Configure SettingEngine to avoid IPv6 link-local binding issues
+        let setting_engine = SettingEngine::default();
+
+        let api = APIBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(setting_engine)
+            .build();
+
+        // Create peer connection
+        let config = RTCConfiguration {
+            ..Default::default()
+        };
+
+        let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+
+        // Set up ICE candidate handler
+        let signaling_clone = signaling.clone();
+        let network_id_clone = signal.network_id.clone();
+        let connection_id = signal.connection_id;
+        peer_connection.on_ice_candidate(Box::new(
+            move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
+                let signaling = signaling_clone.clone();
+                let network_id = network_id_clone.clone();
+                Box::pin(async move {
+                    if let Some(candidate) = candidate {
+                        if let Ok(json) = candidate.to_json() {
+                            // Serialize full RTCIceCandidateInit (includes candidate, sdp_mid, sdp_mline_index)
+                            if let Ok(candidate_json) = serde_json::to_string(&json) {
+                                let candidate_signal =
+                                    Signal::candidate(connection_id, candidate_json, network_id);
+                                let _ = signaling.signal(candidate_signal).await;
+                            }
+                        }
+                    }
+                })
+            },
+        ));
+
+        // Create oneshot channel to wait for first ICE candidate BEFORE set_remote_description
+        // This ensures the candidate handler is ready before ICE negotiation starts
+        let (candidate_tx, candidate_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut notifiers = candidate_notifiers.lock().await;
+            notifiers.insert(connection_id, candidate_tx);
+        }
+
+        // Register per-connection signal channel BEFORE set_remote_description
+        // This ensures we can receive remote candidates as soon as they arrive
+        let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+        {
+            let mut dispatchers = signal_dispatchers.lock().await;
+            dispatchers.insert(connection_id, signal_tx);
+        }
+
+        // Handle incoming ICE candidates for this connection
+        // This must be set up BEFORE set_remote_description to receive candidates immediately
+        let peer_connection_clone = peer_connection.clone();
+        let signal_dispatchers_clone = signal_dispatchers.clone();
+        let candidate_notifiers_clone = candidate_notifiers.clone();
+        tokio::spawn(async move {
+            let mut first_candidate = true;
+            while let Some(sig) = signal_rx.recv().await {
+                if sig.signal_type == SignalType::Candidate {
+                    // Deserialize sig.data into an RTCIceCandidateInit
+                    let candidate_init = match serde_json::from_str::<
+                        webrtc::ice_transport::ice_candidate::RTCIceCandidateInit,
+                    >(&sig.data)
+                    {
+                        Ok(init) => init,
+                        Err(_) => webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
+                            candidate: sig.data.clone(),
+                            sdp_mid: None,
+                            sdp_mline_index: None,
+                            username_fragment: None,
+                        },
+                    };
+
+                    if let Err(e) = peer_connection_clone
+                        .add_ice_candidate(candidate_init)
+                        .await
+                    {
+                        tracing::warn!("Failed to add ICE candidate: {}", e);
+                        continue;
+                    }
+
+                    // Notify waiting handler AFTER adding first candidate to peer connection
+                    if first_candidate {
+                        first_candidate = false;
+                        tracing::debug!("First candidate received and added successfully");
+                        let mut notifiers = candidate_notifiers_clone.lock().await;
+                        if let Some(tx) = notifiers.remove(&connection_id) {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+            }
+            // Clean up dispatcher when channel closes (if not already removed by state handler)
+            {
+                let mut dispatchers = signal_dispatchers_clone.lock().await;
+                dispatchers.remove(&connection_id);
+            }
+
+            // Clean up candidate notifier if it wasn't already removed
+            let mut notifiers = candidate_notifiers_clone.lock().await;
+            notifiers.remove(&connection_id);
+        });
+
+        // Set remote description (offer)
+        let offer =
+            webrtc::peer_connection::sdp::session_description::RTCSessionDescription::offer(
+                signal.data.clone(),
+            )?;
+        peer_connection.set_remote_description(offer).await?;
+
+        // Create answer
+        let answer = peer_connection.create_answer(None).await?;
+        peer_connection
+            .set_local_description(answer.clone())
+            .await?;
+
+        // Signal the answer
+        let answer_signal =
+            Signal::answer(signal.connection_id, answer.sdp, signal.network_id.clone());
+        signaling.signal(answer_signal).await?;
+
+        // Set up connection state change handler to clean up dispatcher
+        let signal_dispatchers_for_cleanup = signal_dispatchers.clone();
+        peer_connection.on_peer_connection_state_change(Box::new(move |state| {
+            let signal_dispatchers = signal_dispatchers_for_cleanup.clone();
+            Box::pin(async move {
+                use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+                match state {
+                    RTCPeerConnectionState::Failed
+                    | RTCPeerConnectionState::Disconnected
+                    | RTCPeerConnectionState::Closed => {
+                        // Remove dispatcher to allow signal_tx to drop and signal_rx to close
+                        let mut dispatchers = signal_dispatchers.lock().await;
+                        dispatchers.remove(&connection_id);
+                    }
+                    _ => {}
+                }
+            })
+        }));
+
+        let session = Arc::new(Session::new(peer_connection.clone()));
+
+        // Channel to notify when data channels are ready
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let ready_tx = Arc::new(tokio::sync::Mutex::new(Some(ready_tx)));
+
+        // Event handler for data channels
+        let session_clone = session.clone();
+        let ready_tx_clone = ready_tx.clone();
+        peer_connection.on_data_channel(Box::new(move |channel| {
+            let session = session_clone.clone();
+            let ready_tx = ready_tx_clone.clone();
+            Box::pin(async move {
+                let label = channel.label().to_string();
+                match label.as_str() {
+                    RELIABLE_CHANNEL => {
+                        let _ = session.set_reliable_channel(channel).await;
+                        // Check if both channels are ready
+                        if session.is_fully_connected().await {
+                            let mut tx_guard = ready_tx.lock().await;
+                            if let Some(tx) = tx_guard.take() {
+                                let _ = tx.send(());
+                            }
+                        }
+                    }
+                    UNRELIABLE_CHANNEL => {
+                        let _ = session.set_unreliable_channel(channel).await;
+                        // Check if both channels are ready
+                        if session.is_fully_connected().await {
+                            let mut tx_guard = ready_tx.lock().await;
+                            if let Some(tx) = tx_guard.take() {
+                                let _ = tx.send(());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            })
+        }));
+
+        // Wait for first ICE candidate and then data channel before adding to incoming queue
+        let session_clone = session.clone();
+        let incoming_tx_clone = incoming_tx.clone();
+        tokio::spawn(async move {
+            // Wait for first ICE candidate (with timeout)
+            match tokio::time::timeout(tokio::time::Duration::from_secs(5), candidate_rx).await {
+                Ok(Ok(())) => {
+                    tracing::debug!("Received first ICE candidate");
+                }
+                Ok(Err(_)) => {
+                    tracing::warn!("Candidate notifier dropped before receiving candidate");
+                }
+                Err(_) => {
+                    tracing::warn!("Timeout waiting for first ICE candidate");
+                    let _ = incoming_tx_clone.send(session_clone);
+                    return;
+                }
+            }
+
+            // Wait up to 5 seconds for data channel to be ready
+            match tokio::time::timeout(tokio::time::Duration::from_secs(5), ready_rx).await {
+                Ok(Ok(())) => {
+                    tracing::debug!("Data channel ready, adding session to incoming queue");
+                    let _ = incoming_tx_clone.send(session_clone);
+                }
+                Ok(Err(_)) | Err(_) => {
+                    tracing::warn!("Timeout waiting for data channel to be ready");
+                    // Still add to incoming queue, client will handle the error
+                    let _ = incoming_tx_clone.send(session_clone);
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Waits for and returns the next inbound session.
+    pub async fn accept(&mut self) -> Result<Arc<Session>> {
+        self.incoming
+            .recv()
+            .await
+            .ok_or_else(|| NethernetError::ConnectionClosed)
+    }
+
+    /// Local socket address that this listener is bound to.
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+}
+
+impl<S: Signaling> Drop for NethernetListener<S> {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+    }
+}
+
+impl<S: Signaling + 'static + Unpin> Stream for NethernetListener<S> {
+    type Item = Arc<Session>;
+
+    /// Polls the listener for the next inbound session, returning Pending if the internal queue is empty.
+    ///
+    /// This method delegates to the inner receiver's poll to produce the next [`Arc<Session>`].
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().incoming.poll_recv(cx)
+    }
+}
+use crate::error::{NethernetError, Result};
+use crate::protocol::{
+    Signal, SignalType,
+    constants::{RELIABLE_CHANNEL, UNRELIABLE_CHANNEL},
+};
+use crate::session::Session;
+use crate::signaling::Signaling;
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
+use rand::Rng;
+use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio_util::io::StreamReader;
+use tokio_util::sync::{CancellationToken, ReusableBoxFuture};
+use webrtc::api::APIBuilder;
+use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::setting_engine::SettingEngine;
+use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
+use webrtc::ice::network_type::NetworkType;
+use webrtc::peer_connection::configuration::RTCConfiguration;
+
+/// NetherNet stream - data transmission over WebRTC
+struct SessionStream {
+    session: Arc<Session>,
+    recv_future: ReusableBoxFuture<'static, Result<Option<Bytes>>>,
+}
+
+impl Stream for SessionStream {
+    type Item = io::Result<Bytes>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.recv_future.poll(cx) {
+            Poll::Ready(result) => {
+                let session = self.session.clone();
+                self.recv_future.set(async move { session.recv().await });
+                match result {
+                    Ok(Some(data)) => Poll::Ready(Some(Ok(data))),
+                    Ok(None) => Poll::Ready(None),
+                    Err(e) => Poll::Ready(Some(Err(io::Error::other(e)))),
+                }
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// NetherNet stream - data transmission over WebRTC
+pub struct NethernetStream {
+    session: Arc<Session>,
+    remote_addr: SocketAddr,
+    reader: StreamReader<SessionStream, Bytes>,
+    send_future: Option<ReusableBoxFuture<'static, Result<()>>>,
+    shutdown_future: Option<ReusableBoxFuture<'static, Result<()>>>,
+}
+
+impl NethernetStream {
+    /// Establishes a WebRTC-backed NethernetStream to a remote peer.
+    ///
+    /// Performs WebRTC offer/answer negotiation via the provided signaling implementation,
+    /// creates reliable and unreliable data channels, exchanges ICE candidates, and waits
+    /// for both data channels to open and for ICE to reach a connected state before
+    /// returning a ready `NethernetStream`.
+    ///
+    /// On success, the returned stream is ready for send/recv operations. This function
+    /// may return `NethernetError::Timeout` if signaling, channel opening, or ICE
+    /// convergence does not complete within the allotted timeout, or `NethernetError::ConnectionClosed`
+    /// if the ICE connection enters a closed/failed state.
+    pub async fn connect<S: Signaling + 'static>(
+        signaling: Arc<S>,
+        remote_network_id: String,
+        remote_addr: SocketAddr,
+    ) -> Result<Self> {
+        // Create WebRTC API with custom settings
+        let media_engine = MediaEngine::default();
+
+        // Configure SettingEngine to avoid IPv6 link-local binding issues
+        let mut setting_engine = SettingEngine::default();
+        setting_engine.set_network_types(vec![NetworkType::Udp4]);
+
+        let api = APIBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(setting_engine)
+            .build();
+
+        // Create peer connection
+        let config = RTCConfiguration {
+            ..Default::default()
+        };
+
+        let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+
+        // Create data channels
+        let reliable_channel = peer_connection
+            .create_data_channel(
+                RELIABLE_CHANNEL,
+                Some(RTCDataChannelInit {
+                    ordered: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await?;
+
+        let unreliable_channel = peer_connection
+            .create_data_channel(
+                UNRELIABLE_CHANNEL,
+                Some(RTCDataChannelInit {
+                    ordered: Some(false),
+                    max_retransmits: Some(0),
+                    ..Default::default()
+                }),
+            )
+            .await?;
+
+        // Generate connection ID
+        let mut connection_id_bytes = [0u8; 8];
+        rand::rng().fill_bytes(&mut connection_id_bytes);
+        let connection_id = u64::from_ne_bytes(connection_id_bytes);
+
+        // Create channels to wait for DataChannel open events
+        let (reliable_open_tx, reliable_open_rx) = tokio::sync::oneshot::channel::<()>();
+        let (unreliable_open_tx, unreliable_open_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Set up on_open handlers for DataChannels
+        let reliable_open_tx = Arc::new(tokio::sync::Mutex::new(Some(reliable_open_tx)));
+        let unreliable_open_tx = Arc::new(tokio::sync::Mutex::new(Some(unreliable_open_tx)));
+
+        let reliable_tx_clone = reliable_open_tx.clone();
+        reliable_channel.on_open(Box::new(move || {
+            let tx = reliable_tx_clone.clone();
+            Box::pin(async move {
+                if let Some(sender) = tx.lock().await.take() {
+                    let _ = sender.send(());
+                }
+            })
+        }));
+
+        let unreliable_tx_clone = unreliable_open_tx.clone();
+        unreliable_channel.on_open(Box::new(move || {
+            let tx = unreliable_tx_clone.clone();
+            Box::pin(async move {
+                if let Some(sender) = tx.lock().await.take() {
+                    let _ = sender.send(());
+                }
+            })
+        }));
+
+        // Set up ICE candidate handler to signal candidates
+        let signaling_clone = signaling.clone();
+        let remote_network_id_clone = remote_network_id.clone();
+        peer_connection.on_ice_candidate(Box::new(
+            move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
+                let signaling = signaling_clone.clone();
+                let network_id = remote_network_id_clone.clone();
+                Box::pin(async move {
+                    if let Some(candidate) = candidate {
+                        if let Ok(json) = candidate.to_json() {
+                            // Serialize full RTCIceCandidateInit (includes candidate, sdp_mid, sdp_mline_index)
+                            if let Ok(candidate_json) = serde_json::to_string(&json) {
+                                let candidate_signal =
+                                    Signal::candidate(connection_id, candidate_json, network_id);
+                                let _ = signaling.signal(candidate_signal).await;
+                            }
+                        }
+                    }
+                })
+            },
+        ));
+
+        // Create offer
+        let offer = peer_connection.create_offer(None).await?;
+        peer_connection.set_local_description(offer.clone()).await?;
+
+        // Create signal stream BEFORE sending offer to avoid race condition where
+        // answer/candidates arrive before we subscribe
+        let mut signals = signaling.signals();
+
+        // Signal the offer
+        let offer_signal = Signal::offer(connection_id, offer.sdp, remote_network_id.clone());
+        signaling.signal(offer_signal).await?;
+
+        // Wait for answer and handle candidates
+        let mut pending_candidates = Vec::new();
+        let answer = loop {
+            if let Some(signal) = signals.next().await {
+                if signal.connection_id == connection_id {
+                    match signal.signal_type {
+                        SignalType::Answer => {
+                            break signal.data;
+                        }
+                        SignalType::Candidate => {
+                            // Buffer remote ICE candidates until after set_remote_description
+                            let candidate_init = match serde_json::from_str::<
+                                webrtc::ice_transport::ice_candidate::RTCIceCandidateInit,
+                            >(&signal.data)
+                            {
+                                Ok(init) => init,
+                                Err(_) => {
+                                    webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
+                                        candidate: signal.data.clone(),
+                                        sdp_mid: None,
+                                        sdp_mline_index: None,
+                                        username_fragment: None,
+                                    }
+                                }
+                            };
+                            pending_candidates.push(candidate_init);
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                return Err(NethernetError::Timeout);
+            }
+        };
+
+        // Set the answer
+        let answer_desc =
+            webrtc::peer_connection::sdp::session_description::RTCSessionDescription::answer(
+                answer,
+            )?;
+        peer_connection.set_remote_description(answer_desc).await?;
+
+        tracing::trace!("Applying {} buffered candidates", pending_candidates.len());
+        for candidate_init in pending_candidates {
+            if let Err(e) = peer_connection.add_ice_candidate(candidate_init).await {
+                tracing::warn!("Failed to add buffered ICE candidate: {}", e);
+            } else {
+                tracing::debug!("Successfully added buffered ICE candidate");
+            }
+        }
+
+        // Continue processing candidates with cancellation support
+        let peer_connection_clone = peer_connection.clone();
+        let cancel_token = CancellationToken::new();
+        let cancel_token_clone = cancel_token.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel_token_clone.cancelled() => {
+                        // Task cancelled, exit loop
+                        tracing::debug!("Candidate processing task cancelled");
+                        break;
+                    }
+                    signal_opt = signals.next() => {
+                        if let Some(signal) = signal_opt {
+                            if signal.connection_id == connection_id
+                                && signal.signal_type == SignalType::Candidate
+                            {
+                                let candidate_init = match serde_json::from_str::<
+                                    webrtc::ice_transport::ice_candidate::RTCIceCandidateInit,
+                                >(&signal.data)
+                                {
+                                    Ok(init) => init,
+                                    Err(_) => {
+                                        tracing::debug!("Failed to parse candidate as JSON, treating as raw string");
+                                        webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
+                                            candidate: signal.data.clone(),
+                                            sdp_mid: None,
+                                            sdp_mline_index: None,
+                                            username_fragment: None,
+                                        }
+                                    }
+                                };
+                                tracing::debug!("Received ICE candidate: {}", candidate_init.candidate);
+                                if let Err(e) = peer_connection_clone
+                                    .add_ice_candidate(candidate_init)
+                                    .await
+                                {
+                                    tracing::warn!("Failed to add ICE candidate: {}", e);
+                                } else {
+                                    tracing::debug!("Successfully added ICE candidate");
+                                }
+                            }
+                        } else {
+                            // Signal stream ended, exit loop
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let session = Arc::new(Session::new(peer_connection.clone()));
+
+        // Set up data channels
+        session.set_reliable_channel(reliable_channel).await?;
+        session.set_unreliable_channel(unreliable_channel).await?;
+
+        // Wait for both DataChannels to open (with timeout)
+        let timeout_duration = std::time::Duration::from_secs(10);
+
+        // Wait for both channels concurrently within the same timeout window
+        tokio::time::timeout(timeout_duration, async {
+            let _ = tokio::join!(reliable_open_rx, unreliable_open_rx);
+        })
+        .await
+        .map_err(|_| NethernetError::Timeout)?;
+
+        // Wait for ICE connection to establish
+        let peer_conn_clone = peer_connection.clone();
+        let ice_connected = tokio::time::timeout(timeout_duration, async move {
+            loop {
+                let state = peer_conn_clone.ice_connection_state();
+                match state {
+                    webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected |
+                    webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Completed => {
+                        return Ok::<(), NethernetError>(());
+                    }
+                    webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Failed |
+                    webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Disconnected |
+                    webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Closed => {
+                        return Err(NethernetError::ConnectionClosed);
+                    }
+                    _ => {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        }).await;
+
+        match ice_connected {
+            Ok(Ok(())) => {
+                // ICE connection established, cancel the candidate processing task
+                cancel_token.cancel();
+            }
+            Ok(Err(e)) => {
+                cancel_token.cancel();
+                return Err(e);
+            }
+            Err(_) => {
+                cancel_token.cancel();
+                return Err(NethernetError::Timeout);
+            }
+        }
+
+        Ok(Self::from_session(session, remote_addr))
+    }
+
+    /// Constructs a NethernetStream from an existing Session and the peer's socket address.
+    pub fn from_session(session: Arc<Session>, remote_addr: SocketAddr) -> Self {
+        let session_clone = session.clone();
+        let recv_future = ReusableBoxFuture::new(async move { session_clone.recv().await });
+
+        let stream = SessionStream {
+            session: session.clone(),
+            recv_future,
+        };
+
+        Self {
+            session,
+            remote_addr,
+            reader: StreamReader::new(stream),
+            send_future: None,
+            shutdown_future: None,
+        }
+    }
+
+    /// Transmits a payload to the remote endpoint associated with this stream.
+    pub async fn send(&self, data: Bytes) -> Result<()> {
+        self.session.send(data).await
+    }
+
+    /// Receive the next available data frame from this stream.
+    pub async fn recv(&self) -> Result<Option<Bytes>> {
+        self.session.recv().await
+    }
+
+    /// Close the stream and its underlying session.
+    pub async fn close(&self) -> Result<()> {
+        self.session.close().await
+    }
+
+    /// Get the socket address of the remote endpoint for this stream.
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
+
+    /// Access the underlying session.
+    pub fn session(&self) -> Arc<Session> {
+        self.session.clone()
+    }
+}
+
+impl AsyncRead for NethernetStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.reader).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for NethernetStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        // If there's an active send future, poll it first
+        if let Some(mut fut) = self.send_future.take() {
+            match fut.poll(cx) {
+                Poll::Ready(Ok(())) => {
+                    // Previous send completed
+                }
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Err(io::Error::other(e)));
+                }
+                Poll::Pending => {
+                    // Still sending
+                    self.send_future = Some(fut);
+                    return Poll::Pending;
+                }
+            }
+        }
+
+        // Start new send
+        let data = Bytes::copy_from_slice(buf);
+        let len = data.len();
+        let session = self.session.clone();
+        let mut fut = ReusableBoxFuture::new(async move { session.send(data).await });
+
+        // Poll immediately to start the future
+        match fut.poll(cx) {
+            Poll::Ready(Ok(())) => {
+                // Completed immediately
+            }
+            Poll::Ready(Err(e)) => {
+                return Poll::Ready(Err(io::Error::other(e)));
+            }
+            Poll::Pending => {
+                self.send_future = Some(fut);
+            }
+        }
+
+        Poll::Ready(Ok(len))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Some(mut fut) = self.send_future.take() {
+            match fut.poll(cx) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::other(e))),
+                Poll::Pending => {
+                    self.send_future = Some(fut);
+                    Poll::Pending
+                }
+            }
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // First flush any pending writes
+        match self.as_mut().poll_flush(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+
+        if self.shutdown_future.is_none() {
+            let session = self.session.clone();
+            self.shutdown_future =
+                Some(ReusableBoxFuture::new(async move { session.close().await }));
+        }
+
+        if let Some(mut fut) = self.shutdown_future.take() {
+            match fut.poll(cx) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::other(e))),
+                Poll::Pending => {
+                    self.shutdown_future = Some(fut);
+                    Poll::Pending
+                }
+            }
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+}
+use crate::error::{NethernetError, Result};
+use crate::protocol::constants::DEFAULT_PACKET_CHANNEL_CAPACITY;
+use crate::protocol::{Message, MessageSegment};
+use bytes::Bytes;
+use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock, mpsc};
+use tracing;
+use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
+use webrtc::peer_connection::RTCPeerConnection;
+
+/// WebRTC session manager
+pub struct Session {
+    peer_connection: Arc<RTCPeerConnection>,
+    reliable_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
+    unreliable_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
+    message_buffer: Arc<Mutex<Message>>,
+    packet_tx: mpsc::Sender<Bytes>,
+    packet_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
+    closed: Arc<RwLock<bool>>,
+}
+
+impl Session {
+    /// Creates a Session using the default packet channel capacity.
+    pub fn new(peer_connection: Arc<RTCPeerConnection>) -> Self {
+        Self::with_capacity(peer_connection, DEFAULT_PACKET_CHANNEL_CAPACITY)
+    }
+
+    /// Creates a Session backed by the given RTCPeerConnection and a bounded packet channel with the specified capacity.
+    pub fn with_capacity(peer_connection: Arc<RTCPeerConnection>, capacity: usize) -> Self {
+        let (packet_tx, packet_rx) = mpsc::channel(capacity);
+
+        Self {
+            peer_connection,
+            reliable_channel: Arc::new(Mutex::new(None)),
+            unreliable_channel: Arc::new(Mutex::new(None)),
+            message_buffer: Arc::new(Mutex::new(Message::new())),
+            packet_tx,
+            packet_rx: Arc::new(Mutex::new(packet_rx)),
+            closed: Arc::new(RwLock::new(false)),
+        }
+    }
+
+    /// Attaches a reliable RTCDataChannel to the session and route incoming message segments into the session's reassembly pipeline.
+    ///
+    /// The provided channel will receive an `on_message` handler that decodes incoming bytes as `MessageSegment`s, accumulates segments in the session's internal buffer, and forwards completed messages to the session's packet receiver. The channel is then stored as the session's reliable data channel.
+    pub async fn set_reliable_channel(&self, channel: Arc<RTCDataChannel>) -> Result<()> {
+        let message_buffer = self.message_buffer.clone();
+        let packet_tx = self.packet_tx.clone();
+
+        channel.on_message(Box::new(move |msg| {
+            let data = msg.data.clone();
+            let buffer = message_buffer.clone();
+            let tx = packet_tx.clone();
+
+            Box::pin(async move {
+                let data_len = data.len();
+                match MessageSegment::decode(data.clone()) {
+                    Ok(segment) => {
+                        let result = {
+                            let mut buf = buffer.lock().await;
+                            buf.add_segment(segment)
+                        };
+                        match result {
+                            Ok(Some(complete_msg)) => {
+                                // Use async send to handle backpressure with bounded channel
+                                // If send fails, it means the receiver has been dropped
+                                let _ = tx.send(complete_msg).await;
+                            }
+                            Ok(None) => {
+                                tracing::debug!("incomplete segment added to buffer, waiting for more segments");
+                            }
+                            Err(e) => {
+                                tracing::warn!("failed to add segment to buffer: {:?}, data length: {}", e, data_len);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "failed to decode message segment: {:?}, data length: {}, data preview: {:?}",
+                            e,
+                            data_len,
+                            &data.as_ref()[..data_len.min(64)]
+                        );
+                    }
+                }
+            })
+        }));
+
+        *self.reliable_channel.lock().await = Some(channel);
+        Ok(())
+    }
+
+    /// Attaches an unreliable RTC data channel to the session.
+    ///
+    /// Replaces any previously set unreliable data channel with the provided one.
+    pub async fn set_unreliable_channel(&self, channel: Arc<RTCDataChannel>) -> Result<()> {
+        *self.unreliable_channel.lock().await = Some(channel);
+        Ok(())
+    }
+
+    /// Sends data over the session using the reliable data channel, splitting the payload into protocol segments as needed.
+    ///
+    /// # Errors
+    ///
+    /// - Returns `NethernetError::ConnectionClosed` if the session has been closed.
+    /// - Returns `NethernetError::DataChannel(...)` if the reliable channel is not set or if sending a segment fails.
+    /// - Returns any error produced by `Message::split_into_segments` when segmenting the input.
+    pub async fn send(&self, data: Bytes) -> Result<()> {
+        if *self.closed.read().await {
+            return Err(NethernetError::ConnectionClosed);
+        }
+
+        let channel = {
+            let guard = self.reliable_channel.lock().await;
+            guard
+                .as_ref()
+                .ok_or_else(|| NethernetError::DataChannel("Reliable channel not set".to_string()))?
+                .clone()
+        };
+
+        let segments = Message::split_into_segments(data)?;
+        for segment in segments {
+            let encoded = segment.encode();
+            channel
+                .send(&encoded)
+                .await
+                .map_err(|e| NethernetError::DataChannel(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    /// Receives the next complete packet from the session.
+    ///
+    /// This returns the next reassembled message produced by the session's incoming
+    /// segment stream. If the session has been closed, or the underlying packet
+    /// channel has been closed, this returns `Ok(None)`.
+    pub async fn recv(&self) -> Result<Option<Bytes>> {
+        if *self.closed.read().await {
+            return Ok(None);
+        }
+
+        // Lock and receive - the lock is automatically released when MutexGuard
+        // goes out of scope at the end of this expression, even if cancelled
+        Ok(self.packet_rx.lock().await.recv().await)
+    }
+
+    /// Shuts down the session by marking it closed and closing any attached data channels and the peer connection.
+    ///
+    /// After this call the session is considered closed; calling `close` again is a no-op.
+    pub async fn close(&self) -> Result<()> {
+        let mut closed = self.closed.write().await;
+        if *closed {
+            return Ok(());
+        }
+        *closed = true;
+        drop(closed);
+
+        // Acquire lock, clone the channel, drop the lock, then close
+        let reliable = self.reliable_channel.lock().await.clone();
+        if let Some(channel) = reliable {
+            let _ = channel.close().await;
+        }
+
+        let unreliable = self.unreliable_channel.lock().await.clone();
+        if let Some(channel) = unreliable {
+            let _ = channel.close().await;
+        }
+
+        self.peer_connection
+            .close()
+            .await
+            .map_err(NethernetError::WebRtc)?;
+
+        Ok(())
+    }
+
+    /// Returns the current ICE connection state of the underlying peer connection.
+    pub fn connection_state(&self) -> RTCIceConnectionState {
+        self.peer_connection.ice_connection_state()
+    }
+
+    /// Gets a clone of the session's RTCPeerConnection.
+    pub fn peer_connection(&self) -> Arc<RTCPeerConnection> {
+        self.peer_connection.clone()
+    }
+
+    /// Reports whether the session has been closed.
+    pub async fn is_closed(&self) -> bool {
+        *self.closed.read().await
+    }
+
+    /// Checks if both reliable and unreliable channels are set.
+    pub async fn is_fully_connected(&self) -> bool {
+        // Avoid holding both locks at once to prevent potential deadlocks
+        let reliable_connected = self.reliable_channel.lock().await.is_some();
+        if !reliable_connected {
+            return false;
+        }
+        self.unreliable_channel.lock().await.is_some()
+    }
+
+    /// Waits for the WebRTC connection to be fully established.
+    ///
+    /// This method polls the ICE connection state until it reaches Connected or Completed state,
+    /// or returns an error if the connection fails.
+    pub async fn wait_for_connection(&self, timeout_ms: Option<u64>) -> Result<()> {
+        let timeout = timeout_ms.unwrap_or(5000);
+        let max_attempts = (timeout / 100).max(1); // Check every 100ms
+
+        for attempt in 0..max_attempts {
+            let state = self.connection_state();
+
+            tracing::trace!(
+                "Waiting for WebRTC connection... (attempt {}/{}), state: {:?}",
+                attempt + 1,
+                max_attempts,
+                state
+            );
+
+            match state {
+                RTCIceConnectionState::Connected | RTCIceConnectionState::Completed => {
+                    tracing::info!("WebRTC connection established!");
+                    return Ok(());
+                }
+                RTCIceConnectionState::Failed
+                | RTCIceConnectionState::Disconnected
+                | RTCIceConnectionState::Closed => {
+                    return Err(NethernetError::ConnectionClosed);
+                }
+                _ => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+
+        Err(NethernetError::Timeout)
+    }
+}
+use crate::error::Result;
+use crate::protocol::Signal;
+use futures::Stream;
+use std::pin::Pin;
+
+pub mod lan;
+
+/// Signaling trait for WebRTC signaling
+/// Abstract interface for WebRTC signaling
+pub trait Signaling: Send + Sync {
+    /// Sends a signal
+    fn signal(&self, signal: Signal) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    /// Returns the signal stream
+    fn signals(&self) -> Pin<Box<dyn Stream<Item = Signal> + Send>>;
+
+    /// Returns the local network ID
+    fn network_id(&self) -> String;
+
+    /// Sets pong data (for LAN discovery)
+    fn set_pong_data(&self, data: Vec<u8>);
+}
+
+/// Notifier trait - for signal and error notifications
+pub trait Notifier: Send + Sync {
+    /// Notifies a new signal
+    fn notify_signal(&self, signal: Signal);
+
+    /// Notifies an error
+    fn notify_error(&self, error: crate::error::NethernetError);
+}
+use crate::error::{NethernetError, Result};
+use crate::protocol::packet::discovery::{
+    self, MessagePacket, RequestPacket, ResponsePacket, ServerData,
+};
+use crate::protocol::{Signal, constants};
+use crate::signaling::Signaling;
+use futures::Stream;
+use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::pin::Pin;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+use tokio::net::UdpSocket;
+use tokio::sync::{RwLock as AsyncRwLock, broadcast};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+const BROADCAST_INTERVAL: Duration = Duration::from_secs(2);
+const ADDRESS_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Protocol-defined ping token used for keepalive/discovery messages
+/// This is the exact wire format expected by the protocol
+const PING_TOKEN: &str = "Ping";
+
+/// LAN-based signaling implementation for peer discovery and WebRTC negotiation.
+pub struct LanSignaling {
+    network_id: u64,
+    socket: Arc<UdpSocket>,
+    addresses: Arc<AsyncRwLock<HashMap<u64, AddressEntry>>>,
+    /// Broadcast sender for fan-out signal distribution to multiple subscribers
+    signal_tx: broadcast::Sender<Signal>,
+    server_data: Arc<RwLock<Option<ServerData>>>,
+    discovered_servers: Arc<AsyncRwLock<HashMap<u64, ServerData>>>,
+    cancel_token: CancellationToken,
+    background_task: Option<JoinHandle<()>>,
+}
+
+struct AddressEntry {
+    addr: SocketAddr,
+    last_seen: Instant,
+}
+
+impl LanSignaling {
+    /// Creates and starts a new LanSignaling instance bound to the given address.
+    ///
+    /// Binds a UDP socket to `bind_addr`, enables broadcast, initializes internal
+    /// shared state (address table, discovered servers, optional server pong data),
+    /// creates a broadcast channel for outbound signals, and spawns the background
+    /// task that handles incoming packets, periodic discovery, and cleanup.
+    ///
+    /// On success returns a configured `LanSignaling` instance ready to send and
+    /// receive LAN signaling messages; on failure returns the underlying I/O or
+    /// setup error.
+    pub async fn new(network_id: u64, bind_addr: SocketAddr) -> Result<Self> {
+        let socket = UdpSocket::bind(bind_addr).await?;
+        socket.set_broadcast(true)?;
+
+        // Use broadcast channel for fan-out to multiple subscribers
+        // Capacity of 100 should be sufficient for signal buffering
+        let (signal_tx, _signal_rx) = broadcast::channel(100);
+
+        // If not binding to DEFAULT_PORT, enable broadcast to DEFAULT_PORT
+        let broadcast_addr = if bind_addr.port() != constants::LAN_DISCOVERY_PORT {
+            Some(SocketAddr::new(
+                Ipv4Addr::BROADCAST.into(),
+                constants::LAN_DISCOVERY_PORT,
+            ))
+        } else {
+            None
+        };
+
+        let cancel_token = CancellationToken::new();
+
+        let socket = Arc::new(socket);
+        let addresses = Arc::new(AsyncRwLock::new(HashMap::new()));
+        let server_data = Arc::new(RwLock::new(None));
+        let discovered_servers = Arc::new(AsyncRwLock::new(HashMap::new()));
+
+        let background_task = Self::start_background_task(
+            network_id,
+            socket.clone(),
+            addresses.clone(),
+            signal_tx.clone(),
+            server_data.clone(),
+            discovered_servers.clone(),
+            broadcast_addr,
+            cancel_token.clone(),
+        );
+
+        let signaling = Self {
+            network_id,
+            socket,
+            addresses,
+            signal_tx,
+            server_data,
+            discovered_servers,
+            cancel_token,
+            background_task: Some(background_task),
+        };
+
+        Ok(signaling)
+    }
+
+    /// Gracefully shuts down the LAN signaling instance.
+    ///
+    /// Cancels the background task and waits for it to complete. This ensures
+    /// that all in-flight operations are finished and no packets will be
+    /// processed after this method returns.
+    ///
+    /// Use this method when you need guaranteed cleanup before proceeding,
+    /// such as before application shutdown or when transitioning to a different
+    /// signaling mechanism.
+    pub async fn shutdown(mut self) {
+        self.cancel_token.cancel();
+        if let Some(task) = self.background_task.take() {
+            let _ = task.await;
+        }
+    }
+
+    /// Returns a snapshot of discovered servers keyed by their network ID.
+    ///
+    /// Clones and returns the current internal map of discovered `ServerData` entries.
+    pub async fn discover(&self) -> HashMap<u64, ServerData> {
+        self.discovered_servers.read().await.clone()
+    }
+
+    /// Return the last-known socket address for the given network ID, if any.
+    pub async fn get_address(&self, network_id: u64) -> Option<SocketAddr> {
+        self.addresses
+            .read()
+            .await
+            .get(&network_id)
+            .map(|entry| entry.addr)
+    }
+
+    /// Spawns a background Tokio task that maintains LAN signaling I/O and state.
+    ///
+    /// The spawned task receives and handles UDP packets, periodically removes stale peer addresses, optionally issues discovery requests to the provided broadcast address, and exits when `cancel_token` is triggered.
+    #[allow(clippy::too_many_arguments)]
+    fn start_background_task(
+        network_id: u64,
+        socket: Arc<UdpSocket>,
+        addresses: Arc<AsyncRwLock<HashMap<u64, AddressEntry>>>,
+        signal_tx: broadcast::Sender<Signal>,
+        server_data: Arc<RwLock<Option<ServerData>>>,
+        discovered_servers: Arc<AsyncRwLock<HashMap<u64, ServerData>>>,
+        broadcast_addr: Option<SocketAddr>,
+        cancel_token: CancellationToken,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            let mut interval = tokio::time::interval(BROADCAST_INTERVAL);
+
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        break;
+                    }
+                    result = socket.recv_from(&mut buf) => {
+                        match result {
+                            Ok((n, addr)) => {
+                                let _ = Self::handle_packet(
+                                    &buf[..n],
+                                    addr,
+                                    network_id,
+                                    &addresses,
+                                    &signal_tx,
+                                    &socket,
+                                    &server_data,
+                                    &discovered_servers,
+                                ).await;
+                            }
+                            Err(e) => {
+                                tracing::debug!("Socket receive error: {}", e);
+                                continue;
+                            }
+                        }
+                    }
+                    _ = interval.tick() => {
+                        Self::cleanup_addresses(&addresses).await;
+
+                        // Send broadcast request if client
+                        if let Some(addr) = broadcast_addr {
+                            let _ = Self::send_request(&socket, network_id, addr).await;
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// Sends a discovery request packet for the specified network to the given address.
+    ///
+    /// The function marshals a discovery request for `network_id` and sends it via `socket` to `addr`.
+    async fn send_request(socket: &UdpSocket, network_id: u64, addr: SocketAddr) -> Result<()> {
+        let request = RequestPacket;
+        let data = discovery::marshal(&request, network_id)?;
+        socket.send_to(&data, addr).await?;
+        tracing::trace!(
+            "Broadcast discovery request sent to {} (network_id: {})",
+            addr,
+            network_id
+        );
+        Ok(())
+    }
+
+    /// Handle an incoming discovery or message packet received over UDP.
+    ///
+    /// Updates the last-seen address for the packet's sender, ignores packets that originate
+    /// from this node, and processes packets by type:
+    /// - REQUEST: if local server data is configured, send a discovery response to the requester.
+    /// - RESPONSE: parse and store discovered ServerData into the discovered_servers map.
+    /// - MESSAGE: ignore ping tokens; if the message is addressed to this node, parse it into
+    ///   a Signal and broadcast it via the provided signal channel.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_packet(
+        data: &[u8],
+        addr: SocketAddr,
+        own_network_id: u64,
+        addresses: &Arc<AsyncRwLock<HashMap<u64, AddressEntry>>>,
+        signal_tx: &broadcast::Sender<Signal>,
+        socket: &Arc<UdpSocket>,
+        server_data: &Arc<RwLock<Option<ServerData>>>,
+        discovered_servers: &Arc<AsyncRwLock<HashMap<u64, ServerData>>>,
+    ) -> Result<()> {
+        // Unmarshal the encrypted packet
+        let (packet, sender_id) = match discovery::unmarshal(data) {
+            Ok(result) => {
+                tracing::trace!(
+                    "Received packet from {} (sender_id: {}, packet_id: {})",
+                    addr,
+                    result.1,
+                    result.0.id()
+                );
+                result
+            }
+            Err(e) => {
+                tracing::trace!(
+                    "Ignoring unrecognized packet from {}: {} (likely from another service)",
+                    addr,
+                    e
+                );
+                return Ok(());
+            }
+        };
+
+        if sender_id == own_network_id {
+            tracing::trace!("Ignoring packet from self (network_id: {})", sender_id);
+            return Ok(());
+        }
+
+        // Update address mapping
+        {
+            let mut addrs = addresses.write().await;
+            addrs.insert(
+                sender_id,
+                AddressEntry {
+                    addr,
+                    last_seen: Instant::now(),
+                },
+            );
+        }
+
+        match packet.id() {
+            constants::ID_REQUEST_PACKET => {
+                tracing::trace!(
+                    "Received discovery REQUEST from {} (network_id: {})",
+                    addr,
+                    sender_id
+                );
+
+                // Request packet - send response if we have server data
+                let server_data_copy = server_data
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+
+                if let Some(data) = server_data_copy.as_ref() {
+                    let app_data = data.marshal()?;
+                    let response = ResponsePacket::new(app_data);
+                    let response_data = discovery::marshal(&response, own_network_id)?;
+                    let _ = socket.send_to(&response_data, addr).await;
+                } else {
+                    tracing::debug!(
+                        "No server data configured - cannot respond to discovery request from {}",
+                        addr
+                    );
+                }
+            }
+            constants::ID_RESPONSE_PACKET => {
+                // Response packet - parse and store server data
+                let response = packet
+                    .as_any()
+                    .downcast_ref::<ResponsePacket>()
+                    .ok_or_else(|| {
+                        NethernetError::Other("failed to downcast ResponsePacket".to_string())
+                    })?;
+
+                if let Ok(server_info) = ServerData::unmarshal(&response.application_data) {
+                    discovered_servers
+                        .write()
+                        .await
+                        .insert(sender_id, server_info);
+                }
+            }
+            constants::ID_MESSAGE_PACKET => {
+                // Message packet - parse signaling data
+                let message = packet
+                    .as_any()
+                    .downcast_ref::<MessagePacket>()
+                    .ok_or_else(|| {
+                        NethernetError::Other("failed to downcast MessagePacket".to_string())
+                    })?;
+
+                // Ignore Ping messages - these are not WebRTC negotiation signals
+                // Use protocol-aware check: match exact wire format to avoid false positives
+                if message.data == PING_TOKEN {
+                    tracing::trace!("Ignoring ping message from network_id: {}", sender_id);
+                    return Ok(());
+                }
+
+                // Only process WebRTC signals if message is for us
+                if message.recipient_id == own_network_id {
+                    tracing::debug!(
+                        "Received WebRTC signal from network_id: {} (recipient: {})",
+                        sender_id,
+                        message.recipient_id
+                    );
+                    if let Ok(signal) = Signal::from_string(&message.data, sender_id.to_string()) {
+                        let _ = signal_tx.send(signal);
+                    }
+                } else {
+                    tracing::trace!(
+                        "Ignoring message for different recipient (expected: {}, got: {})",
+                        own_network_id,
+                        message.recipient_id
+                    );
+                }
+            }
+            _ => {
+                tracing::debug!("Unknown packet type: {}", packet.id());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Removes peer address entries whose `last_seen` timestamp is older than `ADDRESS_TIMEOUT`.
+    ///
+    /// This function acquires a write lock on the provided address map and retains only entries
+    /// observed within the configured timeout window, mutating the map in place.
+    async fn cleanup_addresses(addresses: &Arc<AsyncRwLock<HashMap<u64, AddressEntry>>>) {
+        let mut addrs = addresses.write().await;
+        addrs.retain(|_, entry| entry.last_seen.elapsed() < ADDRESS_TIMEOUT);
+    }
+}
+
+impl Drop for LanSignaling {
+    /// Cancels the internal background task when the instance is dropped.
+    ///
+    /// Note: This only signals cancellation but does not wait for the task to complete.
+    /// For graceful shutdown, use the [`shutdown()`](Self::shutdown) method instead.
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        // Abort the task to ensure it stops as soon as possible
+        if let Some(task) = self.background_task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Signaling for LanSignaling {
+    /// Sends a signaling message to the peer identified by the signal's `network_id`.
+    ///
+    /// Looks up the last-known socket address for the target network ID, serializes the signal
+    /// into a `MessagePacket`, and transmits it over the internal UDP socket.
+    async fn signal(&self, signal: Signal) -> Result<()> {
+        let network_id = signal
+            .network_id
+            .parse::<u64>()
+            .map_err(|e| NethernetError::Other(format!("Invalid network ID: {}", e)))?;
+
+        let addr = {
+            let addrs = self.addresses.read().await;
+            addrs
+                .get(&network_id)
+                .map(|entry| entry.addr)
+                .ok_or_else(|| {
+                    NethernetError::Other(format!("Address not found for network {}", network_id))
+                })?
+        };
+
+        let signal_str = signal.to_string();
+        let message = MessagePacket::new(network_id, signal_str);
+        let data = discovery::marshal(&message, self.network_id)?;
+
+        self.socket.send_to(&data, addr).await?;
+        Ok(())
+    }
+
+    /// Create a stream that yields incoming Signals for a new subscriber.
+    ///
+    /// Each call produces an independent stream that receives all future broadcasted
+    /// signals. If the subscriber falls behind, missed signals are skipped and a
+    /// warning is emitted; the stream ends if the broadcaster is closed.
+    fn signals(&self) -> Pin<Box<dyn Stream<Item = Signal> + Send>> {
+        let rx = self.signal_tx.subscribe();
+        Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(signal) => return Some((signal, rx)),
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Signal receiver lagged, missed {} signals", n);
+                        continue; // Skip lost messages, keep receiving
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        }))
+    }
+
+    /// Returns the local network identifier as a decimal string.
+    fn network_id(&self) -> String {
+        self.network_id.to_string()
+    }
+
+    /// Update the stored server "pong" data from marshalled bytes.
+    fn set_pong_data(&self, data: Vec<u8>) {
+        *self.server_data.write().unwrap_or_else(|e| e.into_inner()) =
+            ServerData::unmarshal(&data).ok();
+    }
+}
