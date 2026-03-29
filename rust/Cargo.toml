@@ -19,4 +19,4 @@ rand = "0.8"
 
 # ПРОВЕРЬ ЭТОТ ПУТЬ! 
 # Он должен вести из папки ~/gamewave/rust в папку ~/nethernet
-nethernet = { path = "/home/asadula/nethernet" }
+nethernet = { path = "../nethernet_lib" }
